@@ -20,6 +20,8 @@ class PoseDetector():
                 min_detection_confidence =  self.detectionCon, 
                 min_tracking_confidence =  self.trackCon
             )
+        self.prev_right_ankle_y = None
+        self.right_ankle_history = []
         
     def findPose(self, frame, draw=True):
         # read frame-by-frame
@@ -152,66 +154,28 @@ class PoseDetector():
             
                 return knee_angle
             
-    def findHeadPosition1(self, frame, nose_id=0, left_ear_id=7, right_ear_id=8, shoulder_mid_id=None, draw=True):
-        if len(self.lmList) > max(nose_id, left_ear_id, right_ear_id):
-            x_nose, y_nose = self.lmList[nose_id][1:]
-            x_lear, y_lear = self.lmList[left_ear_id][1:]
-            x_rear, y_rear = self.lmList[right_ear_id][1:]
+    def findHeadPosition(self, frame, left_eye_id = 2, right_eye_id = 5, left_ear_id = 7, right_ear_id = 8, draw=True):
+        print("findHeadPosition called!")
 
-            # Midpoint between ears (head center)
-            x_head = (x_lear + x_rear) / 2
-            y_head = (y_lear + y_rear) / 2
-
-            # Calculate head tilt (side-to-side lean)
-            ear_dx = x_rear - x_lear
-            ear_dy = y_rear - y_lear
-            head_tilt_angle = math.degrees(math.atan2(ear_dy, ear_dx))  # Positive if right ear is lower
-
-            # Calculate forward/backward head lean (nose relative to head center)
-            nose_dx = x_nose - x_head
-            nose_dy = y_nose - y_head
-            head_lean_angle = math.degrees(math.atan2(nose_dy, nose_dx)) - 90  # Upright ~0°
-
-            # Normalize angles
-            head_tilt_angle = (head_tilt_angle + 360) % 360  # 0° = horizontal
-            head_lean_angle = (head_lean_angle + 180) % 360 - 180  # [-180, 180]
-
-            if draw:
-                # Draw head line (ear-to-ear)
-                cv2.line(frame, (int(x_lear), int(y_lear)), (int(x_rear), int(y_rear)), (0, 255, 255), 2)
-                # Draw nose-to-head line
-                cv2.line(frame, (int(x_head), int(y_head)), (int(x_nose), int(y_nose)), (255, 0, 0), 2)
-                # Display angles
-                cv2.putText(frame, f"Tilt: {head_tilt_angle:.1f}°", (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, f"Lean: {head_lean_angle:.1f}°", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-
-            return {
-                "head_tilt": head_tilt_angle,  # 0° = level, + = right ear down
-                "head_lean": head_lean_angle,  # 0° = upright, + = forward, - = backward
-                "is_upright": abs(head_lean_angle) < 10 and abs(head_tilt_angle - 180) < 10  # Thresholds
-            }
-        else:
+        # landmark existence check
+        if not len(self.lmList) > max(left_ear_id, right_ear_id):
             return None
 
-    def findHeadPosition(self, frame, nose_id = 0, leftEye_id = 2, rightEye_id = 5, leftEar_id = 7, rightEar_id = 8, draw=True):
-        nose_x, nose_y = self.lmList[nose_id][1:]
-        left_eye_x, left_eye_y = self.lmList[leftEye_id][1:]
-        right_eye_x, right_eye_y = self.lmList[rightEye_id][1:]
-        left_ear_x, left_ear_y = self.lmList[leftEar_id][1:]
-        right_ear_x, right_ear_y = self.lmList[rightEar_id][1:]
-
-        # check if looking up or down
-        eyes_mid_x = (left_eye_x + right_eye_x) / 2
-        eyes_mid_y = (left_eye_y + right_eye_y) / 2
+        # calculate midpoints of eyes and ears
+        x_eyes_mid = (self.lmList[left_eye_id][1] + self.lmList[right_eye_id][1]) / 2
+        y_eyes_mid = (self.lmList[left_eye_id][2] + self.lmList[right_eye_id][2]) / 2
         
-        ear_mid = ((left_ear_x + right_ear_x) / 2,
-                   (left_ear_y + right_ear_y) / 2)
+        x_ear_mid = (self.lmList[left_ear_id][1] + self.lmList[right_ear_id][1]) / 2
+        y_ear_mid = (self.lmList[left_ear_id][2] + self.lmList[right_ear_id][2]) / 2
         
-        # Calculate pitch angle (improved calculation)
-        dx = nose_x - eyes_mid_x
-        dy = nose_y - eyes_mid_y
-        pitch_angle = math.degrees(math.atan2(dy, dx)) - 90  # -90 adjusts for natural head orientation
+        # compute vector from eye to ear
+        dx = x_ear_mid - x_eyes_mid
+        dy = y_ear_mid - y_eyes_mid
 
+        head_angle = math.degrees(math.atan2(dy, dx)) # calculate angle relative to horizontal
+        c_head_angle = 180 - head_angle
+
+        # draw lines and stuff if needed
         h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
         scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
 
@@ -222,14 +186,19 @@ class PoseDetector():
             font_scale = 0.8 * scale             # Smaller font
             font_thickness = max(1, int(1 * scale)) # Thinner font
 
-            cv2.line(frame, (int(ear_mid[0]), int(ear_mid[1])), (int(eyes_mid_x), int(eyes_mid_y)), (255, 0, 0), thickness)
-            text = str(int(pitch_angle))
+            cv2.line(frame, (int(x_ear_mid), int(y_ear_mid)), (int(x_eyes_mid), int(y_eyes_mid)), (255, 0, 0), thickness)
+            cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius, (0, 0, 255), cv2.FILLED)
+            cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius_outer, (0, 0, 255), thickness)
+            cv2.circle(frame, (int(x_ear_mid), int(y_ear_mid)), radius, (0, 0, 255), cv2.FILLED)
+            cv2.circle(frame, (int(x_ear_mid), int(y_ear_mid)), radius_outer, (0, 0, 255), thickness)
+
+            text = str(int(c_head_angle))
             (text_width, text_height), baseline = cv2.getTextSize(
                     text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
                 
             # Position text near point p2
-            text_x = ear_mid[0] - int(20 * scale)
-            text_y = ear_mid[1] + int(20 * scale)
+            text_x = x_ear_mid - int(20 * scale)
+            text_y = y_ear_mid + int(20 * scale)
 
             # Background rectangle (scaled padding)
             cv2.rectangle(
@@ -242,9 +211,8 @@ class PoseDetector():
             cv2.putText(frame, text, (int(text_x), int(text_y)),
                         cv2.FONT_HERSHEY_PLAIN, font_scale,
                         (0, 255, 0), font_thickness)
+        return c_head_angle
 
-        return pitch_angle
-    
     def findTorsoLean(self, frame, left_ear_id=7, right_ear_id=8, left_hip_id=23, right_hip_id=24, draw=True):
         if len(self.lmList) > max(right_ear_id, right_hip_id):
             # Get midpoints
@@ -300,7 +268,40 @@ class PoseDetector():
                 return normalized_angle
             else:
                 return None
+
+    def detectFootLanding(self, frame, right_ankle_id=28, left_ankle_id=27, window_size=3, draw=True):
+        # get current ankle coords
+        right_ankle_y = self.lmList[right_ankle_id][2]
+        left_ankle_y = self.lmList[left_ankle_id][2]
         
+        # store history
+        self.right_ankle_history.append(right_ankle_y)
+        if len(self.right_ankle_history) > window_size:
+            self.right_ankle_history.pop(0)
+
+        right_landing = False
+
+        # only check if we have enough history
+        if len(self.right_ankle_history) == window_size:
+            mid = window_size // 2
+            if (self.right_ankle_history[mid] < self.right_ankle_history[0] and 
+                self.right_ankle_history[mid] < self.right_ankle_history[-1]):
+                right_landing = True
+
+        h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
+        scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
+
+        if draw:
+            # Adjusted scaling factors
+            font_scale = 0.8 * scale # Smaller font
+            font_thickness = max(1, int(1 * scale)) # Thinner font
+
+            str_right_landing = str(right_landing)
+
+            cv2.putText(frame, "Foot landed: " + str_right_landing, (50, 100), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+
+        return right_landing
+
     def findRunPhase(self, frame, curr_lmList, prev_lmList, draw=True):
         # curr_lmList and prev_lmList are lmList for current and previous frames
 

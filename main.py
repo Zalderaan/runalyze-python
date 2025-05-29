@@ -48,7 +48,7 @@ async def process_video(file: UploadFile = File(...)):
 
         frame = detector.findPose(frame)
         lmList = detector.findPosition(frame)
-        print(lmList)
+        # print(lmList)
 
         if prev_lmList is not None and lmList:
             detector.findRunPhase(frame, lmList, prev_lmList)
@@ -66,6 +66,7 @@ async def process_video(file: UploadFile = File(...)):
             left_knee = detector.findKneeAngle(frame, 23, 25, 27, draw=True)
             right_knee = detector.findKneeAngle(frame, 24, 26, 28, draw=True)
             foot_strike = detector.findAngle(frame, 26, 28, 32, draw=True)
+            landed = detector.detectFootLanding(frame, draw=True)
 
             print("Head position: ", head_position)
             print("Back Lean: ", back_position)
@@ -73,6 +74,7 @@ async def process_video(file: UploadFile = File(...)):
             print("Left Knee Angle: ", left_knee)
             print("Right Knee Angle: ", right_knee)
             print("Foot strike: ", foot_strike)
+            print("isFootLanded ", landed)
 
         # TODO: Process angle positions
         # * 1. Correctly spot foot landing
