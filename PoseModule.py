@@ -361,3 +361,252 @@ class PoseDetector():
 
         print(f"Phase: {phase}")
         return phase
+
+    # Enhanced foot landing detection methods for PoseModule.py
+
+    def detectFootLanding_Enhanced(self, frame, left_ankle_id=27, right_ankle_id=28, 
+                                left_foot_id=31, right_foot_id=32, 
+                                velocity_threshold=2, height_threshold=15, draw=True):
+        """
+        Enhanced foot landing detection using multiple criteria:
+        1. Velocity change (falling to rising)
+        2. Relative height to ground/hip
+        3. Smoothing to reduce false positives
+        """
+        
+        # Initialize tracking variables if not present
+        if not hasattr(self, 'foot_tracking'):
+            self.foot_tracking = {
+                'left_ankle_history': [],
+                'right_ankle_history': [],
+                'left_velocity_history': [],
+                'right_velocity_history': [],
+                'ground_level': None,
+                'frame_count': 0
+            }
+        
+        self.foot_tracking['frame_count'] += 1
+        
+        # Get current positions
+        left_ankle_y = self.lmList[left_ankle_id][2] if len(self.lmList) > left_ankle_id else None
+        right_ankle_y = self.lmList[right_ankle_id][2] if len(self.lmList) > right_ankle_id else None
+        
+        left_landing = False
+        right_landing = False
+        
+        # Process left foot
+        if left_ankle_y is not None:
+            left_landing = self._detect_single_foot_landing(
+                left_ankle_y, 'left', velocity_threshold, height_threshold
+            )
+        
+        # Process right foot
+        if right_ankle_y is not None:
+            right_landing = self._detect_single_foot_landing(
+                right_ankle_y, 'right', velocity_threshold, height_threshold
+            )
+        
+        # Update ground level estimation
+        self._update_ground_level([left_ankle_y, right_ankle_y])
+        
+        if draw:
+            self._draw_foot_landing_info(frame, left_landing, right_landing)
+        
+        return {'left_landing': left_landing, 'right_landing': right_landing}
+
+    def _detect_single_foot_landing(self, ankle_y, foot_side, velocity_threshold, height_threshold):
+        """Helper method to detect landing for a single foot"""
+        history_key = f'{foot_side}_ankle_history'
+        velocity_key = f'{foot_side}_velocity_history'
+        
+        # Add current position to history
+        self.foot_tracking[history_key].append(ankle_y)
+        
+        # Keep only last 10 frames for analysis
+        if len(self.foot_tracking[history_key]) > 10:
+            self.foot_tracking[history_key].pop(0)
+        
+        # Need at least 3 frames for velocity calculation
+        if len(self.foot_tracking[history_key]) < 3:
+            return False
+        
+        # Calculate velocity (change in y position)
+        recent_positions = self.foot_tracking[history_key][-3:]
+        velocity = recent_positions[-1] - recent_positions[-3]  # 2-frame difference
+        
+        # Add velocity to history
+        self.foot_tracking[velocity_key].append(velocity)
+        if len(self.foot_tracking[velocity_key]) > 5:
+            self.foot_tracking[velocity_key].pop(0)
+        
+        # Detect landing: was moving down (positive velocity), now moving up (negative velocity)
+        if len(self.foot_tracking[velocity_key]) >= 2:
+            prev_velocity = self.foot_tracking[velocity_key][-2]
+            curr_velocity = self.foot_tracking[velocity_key][-1]
+            
+            # Landing criteria:
+            # 1. Was moving down significantly (prev_velocity > threshold)
+            # 2. Now moving up or stopped (curr_velocity <= small positive value)
+            # 3. Near ground level (if we have ground reference)
+            
+            velocity_landing = (prev_velocity > velocity_threshold and 
+                            curr_velocity < velocity_threshold/2)
+            
+            # Height-based validation (if ground level is established)
+            height_validation = True
+            if self.foot_tracking['ground_level'] is not None:
+                distance_from_ground = abs(ankle_y - self.foot_tracking['ground_level'])
+                height_validation = distance_from_ground < height_threshold
+            
+            return velocity_landing and height_validation
+        
+        return False
+
+    def _update_ground_level(self, ankle_positions):
+        """Estimate ground level from ankle positions"""
+        valid_positions = [pos for pos in ankle_positions if pos is not None]
+        
+        if not valid_positions:
+            return
+        
+        # Use the maximum y-value (lowest point) as ground reference
+        current_max = max(valid_positions)
+        
+        if self.foot_tracking['ground_level'] is None:
+            self.foot_tracking['ground_level'] = current_max
+        else:
+            # Gradually update ground level (running average)
+            self.foot_tracking['ground_level'] = (
+                0.95 * self.foot_tracking['ground_level'] + 0.05 * current_max
+            )
+
+    def _draw_foot_landing_info(self, frame, left_landing, right_landing):
+        """Draw foot landing detection information on frame"""
+        h, w = frame.shape[:2]
+        scale = min(w, h) / 1000
+        font_scale = 0.8 * scale
+        font_thickness = max(1, int(1 * scale))
+        
+        # Status text
+        left_status = "LEFT LANDING!" if left_landing else "Left: No"
+        right_status = "RIGHT LANDING!" if right_landing else "Right: No"
+        ground_level = self.foot_tracking.get('ground_level', 'Unknown')
+        
+        # Draw status
+        cv2.putText(frame, left_status, (10, 50), 
+                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+                    (0, 255, 0) if left_landing else (0, 0, 255), font_thickness)
+        cv2.putText(frame, right_status, (10, 80), 
+                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+                    (0, 255, 0) if right_landing else (0, 0, 255), font_thickness)
+        cv2.putText(frame, f"Ground: {int(ground_level) if ground_level != 'Unknown' else ground_level}", 
+                    (10, 110), cv2.FONT_HERSHEY_PLAIN, font_scale, (255, 255, 255), font_thickness)
+
+    # Alternative method using foot-ground contact estimation
+    def detectFootContact_Alternative(self, frame, left_ankle_id=27, right_ankle_id=28,
+                                    left_heel_id=29, right_heel_id=30,
+                                    left_toe_id=31, right_toe_id=32, draw=True):
+        """
+        Alternative approach: Detect foot contact using foot flatness and height
+        """
+        
+        if not hasattr(self, 'contact_tracking'):
+            self.contact_tracking = {
+                'left_contact_frames': 0,
+                'right_contact_frames': 0,
+                'left_was_airborne': False,
+                'right_was_airborne': False
+            }
+        
+        left_contact = False
+        right_contact = False
+        left_landing = False
+        right_landing = False
+        
+        # Check if we have all required landmarks
+        required_landmarks = [left_ankle_id, right_ankle_id, left_heel_id, right_heel_id, left_toe_id, right_toe_id]
+        if all(len(self.lmList) > idx for idx in required_landmarks):
+            
+            # Left foot analysis
+            left_heel_y = self.lmList[left_heel_id][2]
+            left_toe_y = self.lmList[left_toe_id][2]
+            left_ankle_y = self.lmList[left_ankle_id][2]
+            
+            # Right foot analysis
+            right_heel_y = self.lmList[right_heel_id][2]
+            right_toe_y = self.lmList[right_toe_id][2]
+            right_ankle_y = self.lmList[right_ankle_id][2]
+            
+            # Detect foot contact based on foot flatness and relative position
+            left_foot_flat = abs(left_heel_y - left_toe_y) < 20  # Adjust threshold as needed
+            right_foot_flat = abs(right_heel_y - right_toe_y) < 20
+            
+            # Additional criteria: foot is at lowest position relative to recent history
+            left_contact = left_foot_flat and self._is_foot_grounded(left_ankle_y, 'left')
+            right_contact = right_foot_flat and self._is_foot_grounded(right_ankle_y, 'right')
+            
+            # Detect new landings (transition from airborne to contact)
+            left_landing = left_contact and self.contact_tracking['left_was_airborne']
+            right_landing = right_contact and self.contact_tracking['right_was_airborne']
+            
+            # Update tracking state
+            self.contact_tracking['left_was_airborne'] = not left_contact
+            self.contact_tracking['right_was_airborne'] = not right_contact
+            
+            if draw:
+                self._draw_contact_info(frame, left_contact, right_contact, left_landing, right_landing)
+        
+        return {
+            'left_contact': left_contact,
+            'right_contact': right_contact,
+            'left_landing': left_landing,
+            'right_landing': right_landing
+        }
+
+    def _is_foot_grounded(self, ankle_y, foot_side):
+        """Check if foot is in ground contact position"""
+        history_key = f'{foot_side}_ground_history'
+        
+        if not hasattr(self, 'ground_tracking'):
+            self.ground_tracking = {'left_ground_history': [], 'right_ground_history': []}
+        
+        # Add current position
+        self.ground_tracking[history_key].append(ankle_y)
+        
+        # Keep last 15 frames
+        if len(self.ground_tracking[history_key]) > 15:
+            self.ground_tracking[history_key].pop(0)
+        
+        if len(self.ground_tracking[history_key]) < 5:
+            return False
+        
+        # Check if current position is among the lowest 30% of recent positions
+        recent_positions = sorted(self.ground_tracking[history_key])
+        threshold_index = int(len(recent_positions) * 0.3)
+        return ankle_y >= recent_positions[-threshold_index-1]  # Among the lowest positions
+
+    def _draw_contact_info(self, frame, left_contact, right_contact, left_landing, right_landing):
+        """Draw contact detection information"""
+        h, w = frame.shape[:2]
+        scale = min(w, h) / 1000
+        font_scale = 0.7 * scale
+        font_thickness = max(1, int(1 * scale))
+        
+        # Contact status
+        left_text = f"Left: {'CONTACT' if left_contact else 'AIRBORNE'}"
+        right_text = f"Right: {'CONTACT' if right_contact else 'AIRBORNE'}"
+        
+        cv2.putText(frame, left_text, (10, 150), 
+                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+                    (0, 255, 0) if left_contact else (255, 0, 0), font_thickness)
+        cv2.putText(frame, right_text, (10, 180), 
+                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+                    (0, 255, 0) if right_contact else (255, 0, 0), font_thickness)
+        
+        # Landing alerts
+        if left_landing:
+            cv2.putText(frame, "LEFT FOOT LANDING!", (200, 150), 
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 255, 255), font_thickness)
+        if right_landing:
+            cv2.putText(frame, "RIGHT FOOT LANDING!", (200, 180), 
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 255, 255), font_thickness)

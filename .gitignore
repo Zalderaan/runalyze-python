@@ -4,3 +4,6 @@
 
 # cache
 /__pycache__
+
+# specific file
+ai.py

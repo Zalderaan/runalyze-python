@@ -68,6 +68,18 @@ async def process_video(file: UploadFile = File(...)):
             foot_strike = detector.findAngle(frame, 26, 28, 32, draw=True)
             landed = detector.detectFootLanding(frame, window_size=5, draw=True)
 
+            # ENHANCED FOOT LANDING DETECTION
+            # You can use either method or combine both for more robust detection
+            # Method 1: Velocity-based detection
+            # landing_results = detector.detectFootLanding_Enhanced(frame, draw=True)
+            # print("=== FOOT LANDING ANALYSIS ===")
+            # print(f"Velocity-based - Left: {landing_results['left_landing']}, Right: {landing_results['right_landing']}")
+            
+            # Method 2: Contact-based detection (alternative)
+            contact_results = detector.detectFootContact_Alternative(frame, draw=True)
+            print(f"Contact-based - Left Landing: {contact_results['left_landing']}, Right Landing: {contact_results['right_landing']}")
+            print(f"Contact-based - Left Contact: {contact_results['left_contact']}, Right Contact: {contact_results['right_contact']}")
+            
             print("Head position: ", head_position)
             print("Back Lean: ", back_position)
             print("Arm Flexion: ", arm_flexion)
