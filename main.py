@@ -66,7 +66,7 @@ async def process_video(file: UploadFile = File(...)):
             left_knee = detector.findKneeAngle(frame, 23, 25, 27, draw=True)
             right_knee = detector.findKneeAngle(frame, 24, 26, 28, draw=True)
             foot_strike = detector.findAngle(frame, 26, 28, 32, draw=True)
-            landed = detector.detectFootLanding(frame, draw=True)
+            landed = detector.detectFootLanding(frame, window_size=5, draw=True)
 
             print("Head position: ", head_position)
             print("Back Lean: ", back_position)
@@ -77,7 +77,7 @@ async def process_video(file: UploadFile = File(...)):
             print("isFootLanded ", landed)
 
         # TODO: Process angle positions
-        # * 1. Correctly spot foot landing
+        # ! 1. Correctly spot foot landing
         # * 2. Measure angles relevant to foot landing
         out.write(frame) # write annotated frame to the output video
 

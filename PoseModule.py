@@ -269,36 +269,49 @@ class PoseDetector():
             else:
                 return None
 
-    def detectFootLanding(self, frame, right_ankle_id=28, left_ankle_id=27, window_size=3, draw=True):
-        # get current ankle coords
+    def detectFootLanding(self, frame, right_ankle_id=28, right_foot=32, window_size=5, draw=True):
+        # Initialize persistent variables if not already set
+        if not hasattr(self, 'prev_right_ankle_y'):
+            self.prev_right_ankle_y = None
+        if not hasattr(self, 'prev_vy'):
+            self.prev_vy = 0
+
+        # Get current y position of ankle
         right_ankle_y = self.lmList[right_ankle_id][2]
-        left_ankle_y = self.lmList[left_ankle_id][2]
-        
-        # store history
-        self.right_ankle_history.append(right_ankle_y)
-        if len(self.right_ankle_history) > window_size:
-            self.right_ankle_history.pop(0)
 
+        # Calculate vertical velocity if possible
         right_landing = False
+        vy = 0
 
-        # only check if we have enough history
-        if len(self.right_ankle_history) == window_size:
-            mid = window_size // 2
-            if (self.right_ankle_history[mid] < self.right_ankle_history[0] and 
-                self.right_ankle_history[mid] < self.right_ankle_history[-1]):
+        if self.prev_right_ankle_y is not None:
+            vy = right_ankle_y - self.prev_right_ankle_y
+            # Detect sign change: previously falling (vy < 0), now rising (vy > 0)
+            if self.prev_vy < 0 and vy > 0:
                 right_landing = True
+        else:
+            vy = 0  # On first frame
 
-        h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
-        scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
-
+        # Draw result
+        h, w = frame.shape[:2]
+        scale = min(w, h) / 1000
         if draw:
-            # Adjusted scaling factors
-            font_scale = 0.8 * scale # Smaller font
-            font_thickness = max(1, int(1 * scale)) # Thinner font
+            font_scale = 0.8 * scale
+            font_thickness = max(1, int(1 * scale))
+            thickness = max(1, int(1 * scale))  # Thinner lines
+            radius = max(3, int(4 * scale))     # Smaller inner circles
+            radius_outer = max(5, int(6 * scale)) # Slightly larger outer circles
 
-            str_right_landing = str(right_landing)
+            cv2.putText(frame, f"curr ray: {right_ankle_y}", (50, 100), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+            cv2.putText(frame, f"prev ray: {self.prev_right_ankle_y}", (50, 150), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+            cv2.putText(frame, f"Foot landed: {right_landing}", (50, 200), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+            cv2.putText(frame, f"prev velocity: {self.prev_vy}", (50, 250), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+            cv2.putText(frame, f"curr velocity: {vy}", (50, 300), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+            cv2.circle(frame, (int(self.lmList[right_ankle_id][1]), int(right_ankle_y)), radius_outer, (0, 255, 0), thickness)
+            
 
-            cv2.putText(frame, "Foot landed: " + str_right_landing, (50, 100), cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+        # Update previous values for next frame
+        self.prev_vy = vy
+        self.prev_right_ankle_y = right_ankle_y
 
         return right_landing
 
