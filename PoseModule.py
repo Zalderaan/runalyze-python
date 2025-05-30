@@ -596,17 +596,17 @@ class PoseDetector():
         left_text = f"Left: {'CONTACT' if left_contact else 'AIRBORNE'}"
         right_text = f"Right: {'CONTACT' if right_contact else 'AIRBORNE'}"
         
-        cv2.putText(frame, left_text, (10, 150), 
+        cv2.putText(frame, left_text, (50, 450), 
                     cv2.FONT_HERSHEY_PLAIN, font_scale, 
                     (0, 255, 0) if left_contact else (255, 0, 0), font_thickness)
-        cv2.putText(frame, right_text, (10, 180), 
+        cv2.putText(frame, right_text, (50, 500), 
                     cv2.FONT_HERSHEY_PLAIN, font_scale, 
                     (0, 255, 0) if right_contact else (255, 0, 0), font_thickness)
         
         # Landing alerts
         if left_landing:
-            cv2.putText(frame, "LEFT FOOT LANDING!", (200, 150), 
-                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 255, 255), font_thickness)
+            cv2.putText(frame, "LEFT FOOT LANDING!", (240, 450), 
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
         if right_landing:
-            cv2.putText(frame, "RIGHT FOOT LANDING!", (200, 180), 
-                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 255, 255), font_thickness)
+            cv2.putText(frame, "RIGHT FOOT LANDING!", (240, 500), 
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)

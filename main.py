@@ -50,8 +50,8 @@ async def process_video(file: UploadFile = File(...)):
         lmList = detector.findPosition(frame)
         # print(lmList)
 
-        if prev_lmList is not None and lmList:
-            detector.findRunPhase(frame, lmList, prev_lmList)
+        # if prev_lmList is not None and lmList:
+        #     detector.findRunPhase(frame, lmList, prev_lmList)
 
         prev_lmList = lmList
 
