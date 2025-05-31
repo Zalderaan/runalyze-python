@@ -1,6 +1,7 @@
 # videos
 *.mp4
 *.mov
+.env
 
 # cache
 /__pycache__

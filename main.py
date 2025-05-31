@@ -1,19 +1,21 @@
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import os
+import requests
 
 import PoseModule as pm
-
+import RFAnalyzer as rfa
 
 app = FastAPI()
 mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 pose = mp_pose.Pose()
 detector = pm.PoseDetector()
+analyzer = rfa.RFAnalyzer()
 
 # make an endpoint
 @app.post("/process-video/")
@@ -36,6 +38,7 @@ async def process_video(file: UploadFile = File(...)):
     out = cv2.VideoWriter(annotated_video_path, fourcc, 30.0, (width,height))
 
     prev_lmList = None
+    measure_list = None
 
     if not cap.isOpened():
         print("Error: cannot open video file")
@@ -56,46 +59,47 @@ async def process_video(file: UploadFile = File(...)):
         prev_lmList = lmList
 
         if lmList:
-
-            # head_position = detector.findAngle(frame, 0, 8, 12, draw=True)
-            # print("Head position: ", head_position)
-
+            # extract angles per frame
             head_position = detector.findHeadPosition(frame, draw=True)
             back_position = detector.findTorsoLean(frame, draw=True)
             arm_flexion = detector.findAngle(frame, 12, 14, 16, draw=True)
             left_knee = detector.findKneeAngle(frame, 23, 25, 27, draw=True)
             right_knee = detector.findKneeAngle(frame, 24, 26, 28, draw=True)
             foot_strike = detector.findAngle(frame, 26, 28, 32, draw=True)
-            landed = detector.detectFootLanding(frame, window_size=5, draw=True)
-
-            # ENHANCED FOOT LANDING DETECTION
-            # You can use either method or combine both for more robust detection
-            # Method 1: Velocity-based detection
-            # landing_results = detector.detectFootLanding_Enhanced(frame, draw=True)
-            # print("=== FOOT LANDING ANALYSIS ===")
-            # print(f"Velocity-based - Left: {landing_results['left_landing']}, Right: {landing_results['right_landing']}")
-            
-            # Method 2: Contact-based detection (alternative)
             contact_results = detector.detectFootContact_Alternative(frame, draw=True)
-            print(f"Contact-based - Left Landing: {contact_results['left_landing']}, Right Landing: {contact_results['right_landing']}")
-            print(f"Contact-based - Left Contact: {contact_results['left_contact']}, Right Contact: {contact_results['right_contact']}")
-            
-            print("Head position: ", head_position)
-            print("Back Lean: ", back_position)
-            print("Arm Flexion: ", arm_flexion)
-            print("Left Knee Angle: ", left_knee)
-            print("Right Knee Angle: ", right_knee)
-            print("Foot strike: ", foot_strike)
-            print("isFootLanded ", landed)
+
+            angle_list = [head_position, back_position, arm_flexion, 
+                          left_knee, right_knee, foot_strike]
+            # print("Head position: ", head_position)
+            # print("Back Lean: ", back_position)
+            # print("Arm Flexion: ", arm_flexion)
+            # print("Left Knee Angle: ", left_knee)
+            # print("Right Knee Angle: ", right_knee)
+            # print("Foot strike: ", foot_strike)
+            # print(f"Contact-based - Left Landing: {contact_results['left_landing']}, Right Landing: {contact_results['right_landing']}")
+            # print(f"Contact-based - Left Contact: {contact_results['left_contact']}, Right Contact: {contact_results['right_contact']}")
 
         # TODO: Process angle positions
-        # ! 1. Correctly spot foot landing
+        # * 1. Correctly spot foot landing
         # * 2. Measure angles relevant to foot landing
+        # * 2.1 define ideal angles
+        # ? Where to store the extracted angles?
+
+        if contact_results['right_landing']:
+            frame_angles = [head_position, back_position, arm_flexion, 
+                          left_knee, right_knee, foot_strike]
+            analyzer.analyze_frame(frame_angles)  # Score this frame
+
+        # After processing all frames:
+
         out.write(frame) # write annotated frame to the output video
 
         # press q to quit
         if cv2.waitKey(10) & 0xFF == ord('q'):
             break
+        
+    summary = analyzer.get_summary()  # Get aggregated results
+    print(summary)
 
     # clean up
     cap.release()
@@ -103,6 +107,9 @@ async def process_video(file: UploadFile = File(...)):
 
     # return the annotated video as a response
     return FileResponse(annotated_video_path, media_type = 'video/mp4', filename=f"processed_{file.filename}")
+    # return JSONResponse({
+    #     "analysis_summary": summary
+    # })
 
 if __name__ == "__main__":
     import uvicorn
