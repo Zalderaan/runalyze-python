@@ -1,0 +1,12 @@
+# Existing dependencies
+fastapi
+uvicorn
+opencv-python
+mediapipe
+numpy
+
+# New Supabase dependency
+supabase>=2.0.0
+
+# Optional: for better async support
+aiofiles

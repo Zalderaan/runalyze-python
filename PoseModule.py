@@ -268,6 +268,54 @@ class PoseDetector():
                 return normalized_angle
             else:
                 return None
+            
+    def findFootAngle(self, frame, right_ankle_id=28, right_hip_id=24, draw=True):
+        xr_ankle=self.lmList[right_ankle_id][1]
+        yr_ankle=self.lmList[right_ankle_id][2]
+        xr_hip=self.lmList[right_hip_id][1]
+        yr_hip=self.lmList[right_hip_id][2]
+
+        dx = xr_ankle - xr_hip
+        dy = yr_ankle - yr_hip  # Note: In image coordinates, y increases downward
+
+        angle = math.degrees(math.atan2(dx, -dy))
+        
+        normalized_angle = angle
+        while normalized_angle > 180:
+            normalized_angle -= 360
+        while normalized_angle < -180:
+            normalized_angle += 360
+
+        h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
+        scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
+
+        if draw:
+            thickness = max(1, int(1 * scale))  # Thinner lines
+            radius = max(3, int(4 * scale))     # Smaller inner circles
+            radius_outer = max(5, int(6 * scale)) # Slightly larger outer circles
+            font_scale = 0.8 * scale             # Smaller font
+            font_thickness = max(1, int(1 * scale)) # Thinner font
+
+            cv2.line(frame, (int(xr_hip), int(yr_hip)), (int(xr_ankle), int(yr_ankle)), (0, 255, 0), thickness)
+            text = str(int(normalized_angle))
+            (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
+            top_left = (xr_hip - 55, yr_hip - 40)
+            bottom_right = (xr_hip - 55 + text_width + 60, yr_hip - 40 + text_height + 10)
+            text_x = int(xr_hip) - int(20 * scale)
+            text_y = int(yr_hip) - int(20 * scale)
+            
+            # Background rectangle (scaled padding)
+            cv2.rectangle(frame,
+                        (text_x - int(2 * scale), text_y - text_height - int(2 * scale)),
+                        (text_x + text_width + int(2 * scale), text_y + int(2 * scale)),
+                        (255, 255, 255), cv2.FILLED)
+            
+            cv2.putText(frame, text, (text_x, text_y),
+                        cv2.FONT_HERSHEY_PLAIN, font_scale,
+                        (0, 255, 0), font_thickness)
+
+        return normalized_angle
+
 
     def detectFootLanding(self, frame, right_ankle_id=28, right_foot=32, window_size=5, draw=True):
         # Initialize persistent variables if not already set

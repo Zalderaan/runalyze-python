@@ -3,10 +3,10 @@ class RFAnalyzer:
         self.ideal_angles = {
             "head_position": {"min": 10, "max": 20, "tolerance": 4},
             "back_position": {"min": 0, "max": 5, "tolerance": 15},
-            "arm_flexion": {"min": 0, "max": 5, "tolerance": 15},
-            "left_knee": {"min": 0, "max": 5, "tolerance": 15},
-            "right_knee": {"min": 0, "max": 5, "tolerance": 15},
-            "foot_strike": {"min": 0, "max": 5, "tolerance": 15},
+            "arm_flexion": {"min": 75, "max": 85, "tolerance": 5},
+            "left_knee": {"min": 90, "max": 100, "tolerance": 15},
+            "right_knee": {"min": 130, "max": 160, "tolerance": 9},
+            "foot_strike": {"min": 60, "max": 90, "tolerance": 10},
         }
 
         # Stores scores per joint across frames
@@ -21,7 +21,7 @@ class RFAnalyzer:
         tolerance = ideal['tolerance']
         mid_ideal = (min_ideal + max_ideal) / 2 # get midpoint
 
-        if min_ideal <= measured_angle:
+        if min_ideal <= measured_angle <= max_ideal:
             return 100
         
         deviation = abs(measured_angle - mid_ideal)
