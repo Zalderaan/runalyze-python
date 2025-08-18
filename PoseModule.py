@@ -20,8 +20,23 @@ class PoseDetector():
                 min_detection_confidence =  self.detectionCon, 
                 min_tracking_confidence =  self.trackCon
             )
+        
+        # Custom drawing specifications for limb colors
+        self.landmark_drawing_spec = self.mp_draw.DrawingSpec(
+            color=(0, 255, 0),  # Green landmarks
+            thickness=2,
+            circle_radius=2
+        )
+        self.connection_drawing_spec = self.mp_draw.DrawingSpec(
+            color=(255, 0, 255),  # Magenta connections/limbs
+            thickness=2
+        )
+        
         self.prev_right_ankle_y = None
         self.right_ankle_history = []
+        self.prev_x_hip = None
+        self.direction = None
+        self.direction_streak = 0
         
     def findPose(self, frame, draw=True):
         # read frame-by-frame
@@ -29,9 +44,66 @@ class PoseDetector():
         self.results = self.pose.process(frameRGB)
         if self.results.pose_landmarks:
             if draw:
-                self.mp_draw.draw_landmarks(frame, self.results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS)
+                self._draw_pose_with_limb_colors(frame)
 
         return frame
+
+    def _draw_pose_with_limb_colors(self, frame):
+        """Draw pose landmarks with different colors for left and right limbs"""
+        landmarks = self.results.pose_landmarks.landmark
+        h, w, c = frame.shape
+        
+        # Convert landmarks to pixel coordinates
+        points = {}
+        for i, landmark in enumerate(landmarks):
+            x = int(landmark.x * w)
+            y = int(landmark.y * h)
+            points[i] = (x, y)
+        
+        # Define left and right limb connections
+        left_connections = [
+            (11, 13), (13, 15),  # Left arm: shoulder -> elbow -> wrist
+            (15, 17), (15, 19), (15, 21),  # Left hand
+            (23, 25), (25, 27),  # Left leg: hip -> knee -> ankle
+            (27, 29), (27, 31),  # Left foot
+        ]
+        
+        right_connections = [
+            (12, 14), (14, 16),  # Right arm: shoulder -> elbow -> wrist
+            (16, 18), (16, 20), (16, 22),  # Right hand
+            (24, 26), (26, 28),  # Right leg: hip -> knee -> ankle
+            (28, 30), (28, 32),  # Right foot
+        ]
+        
+        # Body center connections (neutral color)
+        center_connections = [
+            (11, 12), (11, 23), (12, 24), (23, 24),  # Torso
+            (0, 1), (1, 2), (2, 3), (3, 7),  # Face left
+            (0, 4), (4, 5), (5, 6), (6, 8),  # Face right
+            (9, 10),  # Mouth
+        ]
+        
+        # Draw connections with different colors
+        thickness = 2
+        
+        # Left limbs in blue
+        for start, end in left_connections:
+            if start in points and end in points:
+                cv2.line(frame, points[start], points[end], (255, 0, 0), thickness)
+        
+        # Right limbs in red
+        for start, end in right_connections:
+            if start in points and end in points:
+                cv2.line(frame, points[start], points[end], (0, 0, 255), thickness)
+        
+        # Center/body in green
+        for start, end in center_connections:
+            if start in points and end in points:
+                cv2.line(frame, points[start], points[end], (0, 255, 0), thickness)
+        
+        # Draw landmarks (joint points) in white
+        for point in points.values():
+            cv2.circle(frame, point, 3, (255, 255, 255), -1)
 
     # * takes pose landmarks per frame, so use findPose first
     def findPosition(self, frame, draw=True):
@@ -69,9 +141,17 @@ class PoseDetector():
             font_scale = 0.8 * scale             # Smaller font
             font_thickness = max(1, int(1 * scale)) # Thinner font
             
-            # Draw lines and circles
-            cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), thickness)
-            cv2.line(frame, (x3, y3), (x2, y2), (255, 255, 255), thickness)
+            # Draw lines and circles with limb-specific colors
+            # Determine color based on which limb is being measured
+            if p1 in [11, 13, 15, 23, 25, 27, 29, 31]:  # Left side landmarks
+                line_color = (255, 0, 0)  # Blue for left limbs
+            elif p1 in [12, 14, 16, 24, 26, 28, 30, 32]:  # Right side landmarks
+                line_color = (0, 0, 255)  # Red for right limbs
+            else:
+                line_color = (0, 255, 0)  # Green for center/other
+            
+            cv2.line(frame, (x1, y1), (x2, y2), line_color, thickness)
+            cv2.line(frame, (x3, y3), (x2, y2), line_color, thickness)
             cv2.circle(frame, (x1, y1), radius, (0, 0, 255), cv2.FILLED)
             cv2.circle(frame, (x1, y1), radius_outer, (0, 0, 255), thickness)
             cv2.circle(frame, (x2, y2), radius, (0, 0, 255), cv2.FILLED)
@@ -126,8 +206,17 @@ class PoseDetector():
                 font_scale = 0.8 * scale             # Smaller font
                 font_thickness = max(1, int(1 * scale)) # Thinner font
 
-                cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), thickness)
-                cv2.line(frame, (x3, y3), (x2, y2), (255, 255, 255), thickness)
+                # Draw lines with limb-specific colors
+                # Determine color based on which knee is being measured
+                if p1 in [23, 25, 27]:  # Left leg landmarks
+                    line_color = (255, 0, 0)  # Blue for left leg
+                elif p1 in [24, 26, 28]:  # Right leg landmarks
+                    line_color = (0, 0, 255)  # Red for right leg
+                else:
+                    line_color = (0, 255, 0)  # Green for center/other
+
+                cv2.line(frame, (x1, y1), (x2, y2), line_color, thickness)
+                cv2.line(frame, (x3, y3), (x2, y2), line_color, thickness)
                 cv2.circle(frame, (x1, y1), radius, (0, 0, 255), cv2.FILLED)
                 cv2.circle(frame, (x1, y1), radius_outer, (0, 0, 255), thickness)
                 cv2.circle(frame, (x2, y2), radius, (0, 0, 255), cv2.FILLED)
@@ -153,9 +242,9 @@ class PoseDetector():
                     (0, 0, 255), font_thickness)
             
                 return knee_angle
-            
+
     def findHeadPosition(self, frame, left_eye_id = 2, right_eye_id = 5, left_ear_id = 7, right_ear_id = 8, draw=True):
-        print("findHeadPosition called!")
+        # print("findHeadPosition called!")
 
         # landmark existence check
         if not len(self.lmList) > max(left_ear_id, right_ear_id):
@@ -174,7 +263,7 @@ class PoseDetector():
 
         head_angle = math.degrees(math.atan2(dy, dx)) # calculate angle relative to horizontal
         c_head_angle = 180 - head_angle
-
+            
         # draw lines and stuff if needed
         h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
         scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
@@ -186,7 +275,10 @@ class PoseDetector():
             font_scale = 0.8 * scale             # Smaller font
             font_thickness = max(1, int(1 * scale)) # Thinner font
 
-            cv2.line(frame, (int(x_ear_mid), int(y_ear_mid)), (int(x_eyes_mid), int(y_eyes_mid)), (255, 0, 0), thickness)
+            # Head position line (center/neutral - green)
+            line_color = (0, 255, 0)  # Green for head/center measurements
+            
+            cv2.line(frame, (int(x_ear_mid), int(y_ear_mid)), (int(x_eyes_mid), int(y_eyes_mid)), line_color, thickness)
             cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius, (0, 0, 255), cv2.FILLED)
             cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius_outer, (0, 0, 255), thickness)
             cv2.circle(frame, (int(x_ear_mid), int(y_ear_mid)), radius, (0, 0, 255), cv2.FILLED)
@@ -221,17 +313,24 @@ class PoseDetector():
             x_hip = (self.lmList[left_hip_id][1] + self.lmList[right_hip_id][1]) / 2
             y_hip = (self.lmList[left_hip_id][2] + self.lmList[right_hip_id][2]) / 2
 
-            dx = x_ear - x_hip
-            dy = y_ear - y_hip  # Note: In image coordinates, y increases downward
+            # Calculate vector from hip to ear (represents spine/torso direction)
+            dx = x_ear - x_hip  # horizontal component
+            dy = y_ear - y_hip  # vertical component (Note: y increases downward in image coordinates)
 
-            # Calculate angle between vertical axis (pointing upward) and hip-to-ear vector
-            # Using atan2(dx, -dy) because:
-            # - Positive x is rightward (ear to right of hip = positive angle)
-            # - Negative y is upward (since image y increases downward)
-            angle = math.degrees(math.atan2(dx, -dy))
+            # Calculate angle between torso and vertical axis
+            # We want: 0° = straight up, positive = forward lean, negative = backward lean
+            # atan2(-dy, dx) gives angle from horizontal axis to vector (hip->ear)
+            # We subtract 90° to get angle from vertical axis
+            # Then negate to match our desired convention (forward lean = positive)
+            angle = math.degrees(math.atan2(dx, -dy))  # -dy because we want upward as positive
             
-            # Normalize to [-180, 180] (though atan2 already returns in this range)
+            # This gives us the angle from vertical where:
+            # 0° = straight up (ear directly above hip)
+            # positive angles = forward lean (ear ahead of hip)
+            # negative angles = backward lean (ear behind hip)
             normalized_angle = angle
+            
+            # Keep angle in reasonable range [-180, 180]
             while normalized_angle > 180:
                 normalized_angle -= 360
             while normalized_angle < -180:
@@ -247,11 +346,18 @@ class PoseDetector():
                 font_scale = 0.8 * scale             # Smaller font
                 font_thickness = max(1, int(1 * scale)) # Thinner font
 
-                cv2.line(frame, (int(x_hip), int(y_hip)), (int(x_ear), int(y_ear)), (0, 255, 0), thickness)
+                # Draw line from hip to ear to visualize torso lean (cyan)
+                cv2.line(frame, (int(x_hip), int(y_hip)), (int(x_ear), int(y_ear)), (255, 255, 0), thickness)
+                
+                # Draw circles at key points
+                cv2.circle(frame, (int(x_hip), int(y_hip)), radius, (0, 0, 255), cv2.FILLED)
+                cv2.circle(frame, (int(x_hip), int(y_hip)), radius_outer, (0, 0, 255), thickness)
+                cv2.circle(frame, (int(x_ear), int(y_ear)), radius, (0, 0, 255), cv2.FILLED)
+                cv2.circle(frame, (int(x_ear), int(y_ear)), radius_outer, (0, 0, 255), thickness)
+                
+                # Display angle text
                 text = str(int(normalized_angle))
                 (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
-                top_left = (x_hip - 55, y_hip - 40)
-                bottom_right = (x_hip - 55 + text_width + 60, y_hip - 40 + text_height + 10)
                 text_x = int(x_hip) - int(20 * scale)
                 text_y = int(y_hip) - int(20 * scale)
                 
@@ -265,9 +371,9 @@ class PoseDetector():
                             cv2.FONT_HERSHEY_PLAIN, font_scale,
                             (0, 255, 0), font_thickness)
 
-                return normalized_angle
-            else:
-                return None
+            return normalized_angle
+        else:
+            return None
             
     def findFootAngle(self, frame, right_ankle_id=28, right_hip_id=24, draw=True):
         xr_ankle=self.lmList[right_ankle_id][1]
@@ -276,9 +382,9 @@ class PoseDetector():
         yr_hip=self.lmList[right_hip_id][2]
 
         dx = xr_ankle - xr_hip
-        dy = yr_ankle - yr_hip  # Note: In image coordinates, y increases downward
+        dy = yr_ankle - yr_hip   # Note: In image coordinates, y increases downward
 
-        angle = math.degrees(math.atan2(dx, -dy))
+        angle = math.degrees(math.atan2(dx, dy))
         
         normalized_angle = angle
         while normalized_angle > 180:
@@ -296,13 +402,16 @@ class PoseDetector():
             font_scale = 0.8 * scale             # Smaller font
             font_thickness = max(1, int(1 * scale)) # Thinner font
 
-            cv2.line(frame, (int(xr_hip), int(yr_hip)), (int(xr_ankle), int(yr_ankle)), (0, 255, 0), thickness)
+            # Foot angle line (green as requested)
+            line_color = (0, 255, 0)  # Green for foot angle measurements
+            
+            cv2.line(frame, (int(xr_hip), int(yr_hip)), (int(xr_ankle), int(yr_ankle)), line_color, thickness)
             text = str(int(normalized_angle))
             (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
             top_left = (xr_hip - 55, yr_hip - 40)
             bottom_right = (xr_hip - 55 + text_width + 60, yr_hip - 40 + text_height + 10)
-            text_x = int(xr_hip) - int(20 * scale)
-            text_y = int(yr_hip) - int(20 * scale)
+            text_x = int(xr_ankle) - int(20 * scale)
+            text_y = int(yr_ankle) - int(20 * scale)
             
             # Background rectangle (scaled padding)
             cv2.rectangle(frame,

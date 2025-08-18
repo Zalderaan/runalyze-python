@@ -1,0 +1,232 @@
+"""
+Feedback Generator Module
+
+This module provides functionality for generating dynamic feedback based on 
+running form analysis results using MediaPipe pose detection.
+"""
+
+import logging
+from typing import Dict, Any
+from enum import Enum
+from drill_suggestions import DrillManager
+
+logger = logging.getLogger(__name__)
+
+class ScoreThresholds(Enum):
+    """Performance score thresholds"""
+    EXCELLENT = 85
+    GOOD = 70
+    NEEDS_IMPROVEMENT = 50
+    POOR = 30
+
+class FeedbackGenerator:
+    """Generates dynamic feedback based on analysis results"""
+    
+    # Area-specific thresholds and advice
+    FEEDBACK_RULES = {
+        "head_position": {
+            "thresholds": [
+                (float('-inf'), 6, "tilted significantly upward", "Focus on looking ahead at the horizon rather than up at the sky."),
+                (6, 10, "titled slightly upward", "Try to keep your gaze more level with the horizon."),
+                (20, 24, "tilted slightly downward", "Try to look a bit further ahead rather than down."),
+                (24, float('inf'), "tilted significantly downward", "Lift your gaze up to look 10-20 feet ahead instead of at the ground."),
+                ("default", "well-positioned", "Great head position! Keep maintaining this neutral head alignment.")
+            ]
+        },
+        "back_position": {
+            "thresholds": [
+                (float('-inf'), 0, "leaning backward", "Focus on a slight forward lean from your ankles, not your waist."),
+                (0, 5, "too upright", "Allow for a slight forward lean (5-10°) from your ankles."),
+                (10, 15, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
+                (15, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
+                ("default", "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean.")
+            ]
+        },
+        "arm_flexion": {
+            "thresholds": [
+                (float('-inf'), 70, "too bent", "Relax your arms slightly to achieve a 90-degree elbow angle."),
+                (70, 75, "slightly too bent", "Let your arms extend a bit more for better swing mechanics."),
+                (85, 90, "slightly too extended", "Bring your elbows in a bit more for optimal efficiency."),
+                (90, float('inf'), "too extended", "Bend your elbows more to achieve a 90-degree angle."),
+                ("default", "well-positioned", "Great arm angle! Keep this 90-degree bend.")
+            ]
+        },
+        "right_knee": {
+            "thresholds": [
+                (float('-inf'), 120, "bent too much on landing", "Try to land with only a slight bend."),
+                (120, 129, "bent slightly more than optimal on landing", "Try bending your knees a tad bit more upon landing."),
+                (160, 170, "slightly too straight upon landing", "Allow your knees a tad bit more bend upon landing."),
+                (170, float('inf'), "bent too straight upon landing", "Try to let your front knee bend more upon landing."),
+                ("default", "shown a good bend upon foot landing", "Great bend! Keep this 80-90 degree bend upon every stride.")
+            ]
+        },
+        "left_knee": {
+            "thresholds": [
+                (float('-inf'), 60, "significantly high heel kick", "try to open up your back knee more when landing your foot."),
+                (60, 80, "heel kick angle a little tighter than optimal", "Slightly open up your back knee more during foot landing."),
+                (90, 110, "slightly low heel kick", "allow for a slightly tighter heel kick for stride."),
+                (110, float('inf'), "significantly low heel kick", "back knee is too open on foot landing."),
+                ("default", "excellent heel kick", "Keep up this heel kick in your back knee for each stride in your training.")
+            ]
+        },
+        "foot_strike": {
+            "thresholds": [
+                (float('-inf'), 0, "landing too far forward on your toes", "Land more on your midfoot rather than your forefoot."),
+                (0, 5, "landing on your forefoot", "Try to land a bit more toward your midfoot."),
+                (10, 15, "landing with a slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
+                (15, float('inf'), "landing on your heel", "Try to land more on your midfoot directly under your center of gravity."),
+                ("default", "landing well on your midfoot", "Excellent foot strike pattern! This is optimal for efficiency.")
+            ]
+        }
+    }
+    
+    @classmethod
+    def generate_dynamic_feedback(cls, area: str, angle: float, score: float) -> str:
+        """
+        Generate dynamic feedback based on measured angles and scores.
+        
+        Args:
+            area: Analysis area (e.g., 'head_position')
+            angle: Measured angle value
+            score: Performance score (0-100)
+            
+        Returns:
+            str: Formatted feedback message
+        """
+        if area not in cls.FEEDBACK_RULES:
+            return f"Analysis shows {angle:.1f}° average for {area.replace('_', ' ')}."
+        
+        rules = cls.FEEDBACK_RULES[area]
+        
+        # Find matching threshold
+        for rule in rules["thresholds"]:
+            if rule[0] == "default":
+                direction = rule[1]
+                advice = rule[2]
+                break
+            elif rule[0] <= angle < rule[1]:
+                direction = rule[2]
+                advice = rule[3]
+                break
+        else:
+            # No matching rule found, use default
+            direction = "showing measured angle"
+            advice = "Continue monitoring this metric."
+        
+        # Format response based on area
+        if area == "head_position":
+            return f"Your head is {direction} (avg: {angle:.1f}°). {advice}"
+        elif area == "back_position":
+            return f"Your torso is {direction} (avg: {angle:.1f}°). {advice}"
+        elif area == "arm_flexion":
+            return f"Your arm flexion is {direction} (avg: {angle:.1f}°). {advice}"
+        elif area == "right_knee":
+            return f"Your front knee is {direction} (avg: {angle:.1f}°). {advice}"
+        elif area == "left_knee":
+            return f"Your back knee is {direction} (avg: {angle:.1f}°). {advice}"
+        elif area == "foot_strike":
+            return f"You are {direction} (avg: {angle:.1f}°). {advice}"
+        else:
+            return f"Analysis shows {angle:.1f}° average for {area.replace('_', ' ')}."
+
+async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, drill_manager: DrillManager) -> Dict[str, Any]:
+    """
+    Generate comprehensive feedback with drill suggestions.
+    
+    Args:
+        analysis_summary: Analysis results from video processing
+        user_id: User identifier for personalization
+        drill_manager: DrillManager instance for drill suggestions
+        
+    Returns:
+        Dict: Complete feedback structure with drills
+    """
+    try:
+        # Score thresholds
+        thresholds = {
+            "EXCELLENT": ScoreThresholds.EXCELLENT.value,
+            "GOOD": ScoreThresholds.GOOD.value,
+            "NEEDS_IMPROVEMENT": ScoreThresholds.NEEDS_IMPROVEMENT.value,
+        }
+
+        feedback = {
+            "overall_assessment": "",
+            "strengths": [],
+            "priority_areas": [],
+            "detailed_feedback": {},
+        }
+
+        # Extract typical angles and scores
+        typical_angles = {
+            area: analysis_summary.get(area, {}).get("typical_angle", 0)
+            for area in ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
+        }
+
+        scores = {
+            area: analysis_summary.get(area, {}).get("median_score", 0)
+            for area in ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
+        }
+        
+        overall_score = analysis_summary.get("overall_score", 0)
+
+        # Generate overall assessment
+        if overall_score >= thresholds["EXCELLENT"]:
+            feedback["overall_assessment"] = "Excellent running form, demonstrating strong technique across most areas."
+        elif overall_score >= thresholds["GOOD"]:
+            feedback["overall_assessment"] = "Good running form with room for some refinement in specific areas."
+        elif overall_score >= thresholds["NEEDS_IMPROVEMENT"]:
+            feedback["overall_assessment"] = "Your running form shows potential but would benefit from further enhancements."
+        else:
+            feedback["overall_assessment"] = "Significant improvements needed in multiple areas of your running form."
+
+        # Process each area
+        for area, score in scores.items():
+            angle = typical_angles[area]
+            
+            # Determine performance level
+            if score >= thresholds["EXCELLENT"]:
+                performance_level = "excellent"
+                feedback["strengths"].append(area.replace("_", " ").title())
+            elif score >= thresholds["GOOD"]:
+                performance_level = "good"
+            elif score >= thresholds["NEEDS_IMPROVEMENT"]:
+                performance_level = "needs_improvement"
+                feedback["priority_areas"].append({
+                    "area": area.replace("_", " ").title(),
+                    "score": score,
+                    "priority": "medium"
+                })
+            else:
+                performance_level = "poor"
+                feedback["priority_areas"].append({
+                    "area": area.replace("_", " ").title(),
+                    "score": score,
+                    "priority": "high"
+                })
+            
+            # Get drills from database
+            drills = await drill_manager.get_drill_suggestions(area, performance_level, angle, user_id)
+            
+            # Format drills for frontend
+            formatted_drills = [drill_manager.format_drill_for_frontend(drill) for drill in drills]
+            
+            # Generate detailed feedback with drills
+            feedback["detailed_feedback"][area] = {
+                "analysis": FeedbackGenerator.generate_dynamic_feedback(area, angle, score),
+                "drills": formatted_drills,
+                "score": score,
+                "angle": angle,
+                "performance_level": performance_level
+            }
+        
+        logger.info(f"Generated feedback for user {user_id} with overall score {overall_score}")
+        return feedback
+        
+    except Exception as e:
+        logger.error(f"Error generating feedback: {e}")
+        return {
+            "overall_assessment": "Error generating assessment",
+            "strengths": [],
+            "priority_areas": [],
+            "detailed_feedback": {},
+        }
