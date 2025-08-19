@@ -112,6 +112,9 @@ video_config = VideoConfig()
 
 logger.info("Application initialized successfully")
 
+# Ensure tmp directory exists
+os.makedirs("tmp", exist_ok=True)
+
 class VideoProcessor:
     """Handles video processing operations"""
     
@@ -740,12 +743,111 @@ storage_manager = StorageManager(supabase, SUPABASE_BUCKET)
 database_manager = DatabaseManager(supabase)
 
 def cleanup_temp(*file_paths):
+    """Basic cleanup function - kept for backwards compatibility"""
     for file_path in file_paths:
         try:
-            if file_path and os.path.exists(file_path):  # ✓ Check if file_path is not None
+            if file_path and os.path.exists(file_path):
                 os.remove(file_path)
+                logger.info(f"Deleted temp file: {file_path}")
         except Exception as e:
-            print(f"Error deleting {file_path}: {str({e})}")
+            logger.error(f"Error deleting {file_path}: {str(e)}")
+
+def cleanup_temp_enhanced(*file_paths):
+    """Enhanced cleanup with better error handling and logging"""
+    deleted_count = 0
+    failed_count = 0
+    
+    for file_path in file_paths:
+        if not file_path:
+            continue
+            
+        try:
+            if os.path.exists(file_path):
+                # Check if file is still locked (Windows issue)
+                try:
+                    # Try to rename file first (tests if it's locked)
+                    temp_name = f"{file_path}.deleting"
+                    os.rename(file_path, temp_name)
+                    os.remove(temp_name)
+                    deleted_count += 1
+                    logger.info(f"Successfully deleted: {file_path}")
+                except OSError as e:
+                    if "being used by another process" in str(e).lower():
+                        logger.warning(f"File locked, scheduling retry: {file_path}")
+                        # Schedule for retry after delay
+                        import threading
+                        threading.Timer(3.0, retry_delete_file, args=[file_path]).start()
+                    else:
+                        # Try direct delete as fallback
+                        os.remove(file_path)
+                        deleted_count += 1
+                        logger.info(f"Successfully deleted (fallback): {file_path}")
+            else:
+                logger.debug(f"File not found for cleanup: {file_path}")
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Failed to delete {file_path}: {str(e)}")
+    
+    if deleted_count > 0 or failed_count > 0:
+        logger.info(f"Cleanup summary: {deleted_count} deleted, {failed_count} failed")
+
+def retry_delete_file(file_path):
+    """Retry deleting a file after delay"""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"Retry delete successful: {file_path}")
+    except Exception as e:
+        logger.error(f"Retry delete failed: {file_path} - {e}")
+
+def cleanup_user_tmp_folder(user_id: str):
+    """Clean up entire user tmp folder"""
+    try:
+        user_tmp_dir = f"tmp/{user_id}"
+        if os.path.exists(user_tmp_dir):
+            import shutil
+            shutil.rmtree(user_tmp_dir)
+            logger.info(f"Cleaned up user tmp folder: {user_tmp_dir}")
+            # Recreate the folders for next use
+            os.makedirs(f"{user_tmp_dir}/processed", exist_ok=True)
+    except Exception as e:
+        logger.error(f"Error cleaning user tmp folder {user_id}: {e}")
+
+def cleanup_old_tmp_files(max_age_hours=24):
+    """Clean up tmp files older than specified hours"""
+    try:
+        current_time = datetime.now().timestamp()
+        max_age_seconds = max_age_hours * 3600
+        deleted_count = 0
+        
+        for root, dirs, files in os.walk("tmp"):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    file_age = current_time - os.path.getctime(file_path)
+                    if file_age > max_age_seconds:
+                        os.remove(file_path)
+                        deleted_count += 1
+                        logger.info(f"Deleted old tmp file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error deleting old file {file_path}: {e}")
+        
+        # Clean up empty directories
+        for root, dirs, files in os.walk("tmp", topdown=False):
+            for dir_name in dirs:
+                dir_path = os.path.join(root, dir_name)
+                try:
+                    if not os.listdir(dir_path):  # Empty directory
+                        os.rmdir(dir_path)
+                        logger.info(f"Removed empty directory: {dir_path}")
+                except Exception as e:
+                    logger.debug(f"Could not remove directory {dir_path}: {e}")
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old tmp files")
+            
+    except Exception as e:
+        logger.error(f"Error in cleanup_old_tmp_files: {e}")
 
 @app.post("/process-video/")
 async def process_video(
@@ -941,21 +1043,139 @@ async def process_video(
     finally:
         # Ensure resources are released even if there's an error
         try:
-            if cap:
+            if 'cap' in locals() and cap:
                 cap.release()
-            if out:
+            if 'out' in locals() and out:
                 out.release()
             cv2.destroyAllWindows()
+        except Exception as e:
+            logger.error(f"Error releasing video resources: {e}")
+        
+        # Add delay before cleanup (important on Windows)
+        import time
+        time.sleep(0.3)
+        
+        # Build cleanup list with proper error handling
+        cleanup_files = []
+        
+        # Add files that should always be cleaned up
+        if 'video_path' in locals() and video_path:
+            cleanup_files.append(video_path)
+        if 'thumbnail_path' in locals() and thumbnail_path:
+            cleanup_files.append(thumbnail_path)
+        if 'annotated_video_path' in locals() and annotated_video_path:
+            cleanup_files.append(annotated_video_path)
+        
+        # Add conditional files
+        if 'final_video_path' in locals() and final_video_path:
+            cleanup_files.append(final_video_path)
+        
+        # Add corrected video if it was created and is different from original
+        try:
+            if 'rotation' in locals() and 'corrected_video_path' in locals():
+                if rotation != 0 and corrected_video_path != video_path:
+                    cleanup_files.append(corrected_video_path)
         except:
             pass
         
-        # Add delay before cleanup
-        import time
-        time.sleep(0.2)
+        # Use enhanced cleanup
+        cleanup_temp_enhanced(*cleanup_files)
         
-        # Clean up temporary files (including corrected video if created)
-        corrected_video_cleanup = corrected_video_path if rotation != 0 and corrected_video_path != video_path else None
-        cleanup_temp(video_path, final_video_path, annotated_video_path, thumbnail_path, corrected_video_cleanup)
+        # Also try to clean up the entire user folder if processing failed
+        try:
+            if 'user_id' in locals() and user_id:
+                # Check if there are any leftover files
+                user_tmp_dir = f"tmp/{user_id}"
+                if os.path.exists(user_tmp_dir):
+                    files_in_dir = []
+                    for root, dirs, files in os.walk(user_tmp_dir):
+                        files_in_dir.extend([os.path.join(root, f) for f in files])
+                    
+                    if len(files_in_dir) > 5:  # Too many leftover files
+                        logger.warning(f"Many leftover files detected for user {user_id}, cleaning up folder")
+                        cleanup_user_tmp_folder(user_id)
+        except Exception as e:
+            logger.error(f"Error in additional cleanup: {e}")
+
+@app.get("/cleanup-status/")
+async def cleanup_status():
+    """Check for leftover temporary files"""
+    tmp_files = []
+    total_size = 0
+    
+    try:
+        if os.path.exists("tmp"):
+            for root, dirs, files in os.walk("tmp"):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        file_time = os.path.getctime(file_path)
+                        age_hours = (datetime.now().timestamp() - file_time) / 3600
+                        
+                        total_size += file_size
+                        tmp_files.append({
+                            "path": file_path,
+                            "size_mb": round(file_size / (1024*1024), 2),
+                            "age_hours": round(age_hours, 2),
+                            "created": datetime.fromtimestamp(file_time).isoformat()
+                        })
+                    except Exception as e:
+                        logger.error(f"Error getting file info for {file_path}: {e}")
+        
+        # Sort by age (oldest first)
+        tmp_files.sort(key=lambda x: x["age_hours"], reverse=True)
+        
+    except Exception as e:
+        logger.error(f"Error checking tmp files: {e}")
+        return {"error": str(e)}
+    
+    return {
+        "tmp_file_count": len(tmp_files),
+        "total_size_mb": round(total_size / (1024*1024), 2),
+        "oldest_files": tmp_files[:10],  # Show 10 oldest files
+        "large_files": sorted([f for f in tmp_files if f["size_mb"] > 10], 
+                             key=lambda x: x["size_mb"], reverse=True)[:5]
+    }
+
+@app.post("/cleanup-old-files/")
+async def cleanup_old_files(max_age_hours: int = 24):
+    """Force cleanup of old temporary files"""
+    try:
+        cleanup_old_tmp_files(max_age_hours)
+        return {"message": f"Cleanup completed for files older than {max_age_hours} hours"}
+    except Exception as e:
+        logger.error(f"Error in cleanup endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+@app.post("/force-cleanup/")
+async def force_cleanup():
+    """Force cleanup of entire tmp directory (use with caution)"""
+    try:
+        import shutil
+        if os.path.exists("tmp"):
+            shutil.rmtree("tmp")
+            logger.info("Force cleanup: removed entire tmp directory")
+        
+        # Recreate tmp directory
+        os.makedirs("tmp", exist_ok=True)
+        logger.info("Recreated tmp directory")
+        
+        return {"message": "Force cleanup completed - entire tmp directory recreated"}
+    except Exception as e:
+        logger.error(f"Error in force cleanup: {e}")
+        raise HTTPException(status_code=500, detail=f"Force cleanup failed: {str(e)}")
+
+@app.post("/cleanup-user/{user_id}")
+async def cleanup_user_files(user_id: str):
+    """Clean up files for a specific user"""
+    try:
+        cleanup_user_tmp_folder(user_id)
+        return {"message": f"Cleaned up files for user {user_id}"}
+    except Exception as e:
+        logger.error(f"Error cleaning up user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"User cleanup failed: {str(e)}")
+
 
 @app.post("/test-both-rotations/")
 async def test_both_rotations(file: UploadFile = File(...)):
@@ -1045,6 +1265,14 @@ async def debug_rotation(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Debug rotation error: {e}")
         raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
+
+# Startup cleanup - remove old tmp files when server starts
+try:
+    logger.info("Performing startup cleanup of old tmp files...")
+    cleanup_old_tmp_files(max_age_hours=6)  # Clean files older than 6 hours on startup
+    logger.info("Startup cleanup completed")
+except Exception as e:
+    logger.error(f"Startup cleanup failed: {e}")
 
 if __name__ == "__main__":
     import uvicorn
