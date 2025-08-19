@@ -271,7 +271,6 @@ class VideoProcessor:
     def add_faststart(input_path: str) -> str:
         """
         Add faststart metadata to video for web streaming with proper orientation correction.
-        Handles different video formats for cloud platform compatibility.
         
         Args:
             input_path: Path to input video
@@ -280,44 +279,103 @@ class VideoProcessor:
             str: Path to processed video
         """
         try:
-            # Get file extension and create appropriate output path
-            input_ext = os.path.splitext(input_path)[1]
-            base_path = os.path.splitext(input_path)[0]
-            
-            # Try to convert to MP4 for web compatibility, fallback to original format
-            if input_ext.lower() == '.mp4':
-                output_path = f"{base_path}_faststart.mp4"
-                codec_args = "-c:v libx264"
-            else:
-                # For non-MP4 files, try to convert to MP4, fallback to original format
-                output_path = f"{base_path}_faststart.mp4"
-                codec_args = "-c:v libx264"
-                logger.info(f"Converting {input_ext} to MP4 for web compatibility")
+            output_path = input_path.replace(".mp4", "_faststart.mp4")
             
             # Detect video rotation
             rotation = VideoProcessor.get_video_rotation(input_path)
             logger.info(f"Detected video rotation: {rotation} degrees")
             
-            # Simple conversion command for cloud platforms
-            simple_cmd = (
-                f'ffmpeg -i "{input_path}" {codec_args} -crf {video_config.ffmpeg_crf} '
+            # Use FFmpeg's autorotate feature as primary method
+            autorotate_cmd = (
+                f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
                 f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
                 f'-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
-                f'"{output_path}" -y'
+                f'-metadata:s:v rotate=0 "{output_path}" -y'
             )
             
-            logger.info(f"Processing video with FFmpeg: {input_path} -> {output_path}")
-            result = os.system(simple_cmd)
+            # Manual transpose method for when autorotate doesn't work
+            manual_cmd = None
+            if rotation != 0:
+                # Debug: Let's try different approaches based on the detected rotation
+                logger.info(f"Processing rotation: {rotation}° - determining correct transpose")
+                
+                # For mobile videos, the rotation metadata can be misleading
+                # Let's try a more empirical approach
+                if rotation == 90:
+                    # Try counter-clockwise first for 90° metadata
+                    transpose_filter = "transpose=2,"  # 90 degrees counter-clockwise
+                    logger.info("Using transpose=2 (90° counter-clockwise) for 90° rotation")
+                elif rotation == 270:
+                    # For 270° metadata, try clockwise rotation
+                    transpose_filter = "transpose=1,"  # 90 degrees clockwise  
+                    logger.info("Using transpose=1 (90° clockwise) for 270° rotation")
+                elif rotation == 180:
+                    transpose_filter = "transpose=1,transpose=1,"  # 180 degrees
+                    logger.info("Using double transpose for 180° rotation")
+                else:
+                    # For dimension-based detection (no metadata), try clockwise
+                    transpose_filter = "transpose=1,"
+                    logger.info("Using default transpose=1 (90° clockwise) for dimension-based detection")
+                
+                # Build the video filter chain with manual rotation
+                video_filters = f"{transpose_filter}scale=trunc(iw/2)*2:trunc(ih/2)*2"
+                
+                manual_cmd = (
+                    f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
+                    f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                    f'-vf "{video_filters}" '
+                    f'-metadata:s:v rotate=0 "{output_path}" -y'
+                )
+            
+            # Try the appropriate command - prioritize manual rotation if detected
+            if rotation != 0 and manual_cmd:
+                cmd_to_use = manual_cmd
+                logger.info(f"Using manual rotation correction for {rotation}° rotation: {input_path}")
+            else:
+                cmd_to_use = autorotate_cmd
+                logger.info(f"Using autorotate processing (rotation: {rotation}°): {input_path}")
+            
+            result = os.system(cmd_to_use)
             
             if result == 0:
-                logger.info(f"Video processing completed: {output_path}")
+                logger.info(f"Video processing completed with orientation fix: {output_path}")
                 return output_path
             else:
                 logger.error(f"FFmpeg processing failed with code: {result}")
-                # If processing fails, return original file
-                logger.warning("Returning original file due to processing failure")
-                return input_path
-            
+                # If manual command failed, try alternative rotations
+                if rotation != 0 and manual_cmd and cmd_to_use == manual_cmd:
+                    logger.info("Manual rotation failed, trying alternative rotations...")
+                    
+                    # Try the opposite rotation
+                    alt_transpose = ""
+                    if "transpose=1" in manual_cmd:
+                        alt_transpose = "transpose=2"  # Try counter-clockwise instead
+                        logger.info("Trying counter-clockwise rotation")
+                    elif "transpose=2" in manual_cmd:
+                        alt_transpose = "transpose=1"  # Try clockwise instead
+                        logger.info("Trying clockwise rotation")
+                    
+                    if alt_transpose:
+                        alt_output = input_path.replace(".mp4", "_alt_faststart.mp4")
+                        alt_cmd = (
+                            f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
+                            f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                            f'-vf "{alt_transpose},scale=trunc(iw/2)*2:trunc(ih/2)*2" '
+                            f'-metadata:s:v rotate=0 "{alt_output}" -y'
+                        )
+                        
+                        result = os.system(alt_cmd)
+                        if result == 0:
+                            logger.info(f"Alternative rotation successful: {alt_output}")
+                            return alt_output
+                    
+                    # Final fallback to autorotate
+                    logger.info("Trying autorotate fallback...")
+                    result = os.system(autorotate_cmd)
+                    if result == 0:
+                        logger.info(f"Video processing completed with autorotate fallback: {output_path}")
+                        return output_path
+                
                 return input_path
                 
         except Exception as e:
@@ -879,51 +937,9 @@ async def process_video(
         height = original_height
         logger.info(f"Processing corrected video dimensions: {width}x{height}")
 
-        # -- ready output with codec fallback for cloud platforms
-        def get_working_codec():
-            """Try different codecs until one works"""
-            codecs_to_try = [
-                ('mp4v', '.mp4'),  # MPEG-4 (most compatible)
-                ('XVID', '.avi'),  # Xvid codec
-                ('MJPG', '.avi'),  # Motion JPEG (very compatible)
-                ('avc1', '.mp4'),  # H.264 (if available)
-            ]
-            
-            for codec, ext in codecs_to_try:
-                try:
-                    fourcc = cv2.VideoWriter_fourcc(*codec)
-                    # Test the codec with a temporary file
-                    test_path = f"tmp/{user_id}/test_codec{ext}"
-                    test_writer = cv2.VideoWriter(test_path, fourcc, 30.0, (width, height), isColor=True)
-                    
-                    if test_writer.isOpened():
-                        test_writer.release()
-                        # Clean up test file
-                        if os.path.exists(test_path):
-                            os.remove(test_path)
-                        logger.info(f"Using codec: {codec}")
-                        return fourcc, ext
-                    else:
-                        test_writer.release()
-                        
-                except Exception as e:
-                    logger.debug(f"Codec {codec} failed: {e}")
-                    continue
-            
-            # Ultimate fallback - no compression
-            logger.warning("All codecs failed, using uncompressed")
-            return cv2.VideoWriter_fourcc(*'RGBA'), '.avi'
-
-        fourcc, file_ext = get_working_codec()
-        
-        # Update output path with correct extension
-        if not annotated_video_path.endswith(file_ext):
-            annotated_video_path = os.path.splitext(annotated_video_path)[0] + file_ext
-        
-        out = cv2.VideoWriter(annotated_video_path, fourcc, 30.0, (width, height), isColor=True)
-        
-        if not out.isOpened():
-            raise Exception(f"Failed to open VideoWriter with any codec. Check FFmpeg installation.")
+        # -- ready output
+        fourcc = cv2.VideoWriter_fourcc(*'avc1') # codec for output video
+        out = cv2.VideoWriter(annotated_video_path, fourcc, 30.0, (width,height), isColor=True)
 
         prev_lmList = None
         measure_list = None
@@ -1084,65 +1100,6 @@ async def process_video(
                         cleanup_user_tmp_folder(user_id)
         except Exception as e:
             logger.error(f"Error in additional cleanup: {e}")
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint with FFmpeg and codec verification"""
-    try:
-        # Check basic app status
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "version": "1.0.0"
-        }
-        
-        # Test FFmpeg availability
-        try:
-            result = subprocess.run(['ffmpeg', '-version'], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                health_status["ffmpeg"] = "available"
-                # Extract FFmpeg version
-                version_line = result.stdout.split('\n')[0]
-                health_status["ffmpeg_version"] = version_line
-            else:
-                health_status["ffmpeg"] = "error"
-        except Exception as e:
-            health_status["ffmpeg"] = f"not available: {str(e)}"
-        
-        # Test OpenCV codecs
-        try:
-            test_codecs = ['mp4v', 'XVID', 'MJPG']
-            available_codecs = []
-            
-            for codec in test_codecs:
-                try:
-                    fourcc = cv2.VideoWriter_fourcc(*codec)
-                    available_codecs.append(codec)
-                except:
-                    pass
-            
-            health_status["opencv_codecs"] = available_codecs
-        except Exception as e:
-            health_status["opencv_codecs"] = f"error: {str(e)}"
-        
-        # Check tmp directory
-        try:
-            if os.path.exists("tmp"):
-                health_status["tmp_directory"] = "exists"
-            else:
-                health_status["tmp_directory"] = "missing"
-        except Exception as e:
-            health_status["tmp_directory"] = f"error: {str(e)}"
-            
-        return health_status
-        
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
 
 @app.get("/cleanup-status/")
 async def cleanup_status():
