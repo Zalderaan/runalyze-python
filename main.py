@@ -67,14 +67,18 @@ app = FastAPI(
 
 # CORS configuration
 CORS_ORIGINS = [
-    # "http://localhost",
-    # "http://localhost:3000",
-    # "http://127.0.0.1:8000",
-    # "http://localhost:8000",
-    # "http://127.0.0.1:3000",
-    "https://runalyze-8x1vbed8s-zalderaans-projects.vercel.app/"
-    # "*",  # Remove in production for security
+    "https://runalyze-8x1vbed8s-zalderaans-projects.vercel.app",  # Your Vercel app
 ]
+
+# Add localhost for development
+import os
+if os.getenv("ENVIRONMENT") != "production":
+    CORS_ORIGINS.extend([
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ])
 
 app.add_middleware(
     CORSMiddleware,

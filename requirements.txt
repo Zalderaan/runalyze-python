@@ -1,12 +1,19 @@
-# Existing dependencies
-fastapi
-uvicorn
-opencv-python
-mediapipe
-numpy
+# Core FastAPI dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
 
-# New Supabase dependency
-supabase>=2.0.0
+# Computer Vision
+opencv-python-headless==4.8.1.78
+mediapipe==0.10.7
+numpy==1.24.3
 
-# Optional: for better async support
-aiofiles
+# Database & Storage
+supabase==2.0.2
+
+# Utilities
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Production dependencies
+psutil==5.9.6
