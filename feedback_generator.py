@@ -27,55 +27,61 @@ class FeedbackGenerator:
         "head_position": {
             "thresholds": [
                 (float('-inf'), 6, "tilted significantly upward", "Focus on looking ahead at the horizon rather than up at the sky."),
-                (6, 10, "titled slightly upward", "Try to keep your gaze more level with the horizon."),
+                (6, 10, "tilted slightly upward", "Try to keep your gaze more level with the horizon."),
+                (10, 20, "well-positioned", "Great head position! Keep maintaining this neutral head alignment."),
                 (20, 24, "tilted slightly downward", "Try to look a bit further ahead rather than down."),
                 (24, float('inf'), "tilted significantly downward", "Lift your gaze up to look 10-20 feet ahead instead of at the ground."),
-                ("default", "well-positioned", "Great head position! Keep maintaining this neutral head alignment.")
+                ("default", "positioned", "Continue monitoring your head position.")
             ]
         },
         "back_position": {
             "thresholds": [
-                (float('-inf'), 0, "leaning backward", "Focus on a slight forward lean from your ankles, not your waist."),
-                (0, 5, "too upright", "Allow for a slight forward lean (5-10°) from your ankles."),
-                (10, 15, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
-                (15, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
-                ("default", "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean.")
+                (float('-inf'), -15, "leaning significantly backward", "Focus on a slight forward lean from your ankles, not your waist."),
+                (-15, 0, "leaning backward or too upright", "Allow for a slight forward lean (0-5°) from your ankles."),
+                (0, 5, "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean."),
+                (5, 20, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
+                (20, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
+                ("default", "positioned", "Continue monitoring your torso position.")
             ]
         },
         "arm_flexion": {
             "thresholds": [
-                (float('-inf'), 70, "too bent", "Relax your arms slightly to achieve a 90-degree elbow angle."),
-                (70, 75, "slightly too bent", "Let your arms extend a bit more for better swing mechanics."),
-                (85, 90, "slightly too extended", "Bring your elbows in a bit more for optimal efficiency."),
-                (90, float('inf'), "too extended", "Bend your elbows more to achieve a 90-degree angle."),
-                ("default", "well-positioned", "Great arm angle! Keep this 90-degree bend.")
+                (float('-inf'), 55, "too bent", "Relax your arms slightly to achieve a 70-90 degree elbow angle."),
+                (55, 70, "slightly too bent", "Let your arms extend a bit more for better swing mechanics."),
+                (70, 90, "well-positioned", "Great arm angle! Keep this optimal elbow bend."),
+                (90, 105, "slightly too extended", "Bring your elbows in a bit more for optimal efficiency."),
+                (105, float('inf'), "too extended", "Bend your elbows more to achieve a 70-90 degree angle."),
+                ("default", "positioned", "Continue monitoring your arm position.")
             ]
         },
         "right_knee": {
             "thresholds": [
-                (float('-inf'), 120, "bent too much on landing", "Try to land with only a slight bend."),
-                (120, 129, "bent slightly more than optimal on landing", "Try bending your knees a tad bit more upon landing."),
-                (160, 170, "slightly too straight upon landing", "Allow your knees a tad bit more bend upon landing."),
-                (170, float('inf'), "bent too straight upon landing", "Try to let your front knee bend more upon landing."),
-                ("default", "shown a good bend upon foot landing", "Great bend! Keep this 80-90 degree bend upon every stride.")
+                (float('-inf'), 100, "bent too much on landing", "Try to land with less knee bend for better efficiency."),
+                (100, 120, "bent slightly more than optimal on landing", "Allow for a bit less knee bend upon landing."),
+                (120, 170, "showing good bend upon foot landing", "Great knee position! Keep this optimal bend upon every stride."),
+                (170, 190, "slightly too straight upon landing", "Allow your knees a bit more bend upon landing."),
+                (190, float('inf'), "too straight upon landing", "Try to let your front knee bend more upon landing."),
+                ("default", "positioned", "Continue monitoring your knee position.")
             ]
         },
         "left_knee": {
             "thresholds": [
-                (float('-inf'), 60, "significantly high heel kick", "try to open up your back knee more when landing your foot."),
-                (60, 80, "heel kick angle a little tighter than optimal", "Slightly open up your back knee more during foot landing."),
-                (90, 110, "slightly low heel kick", "allow for a slightly tighter heel kick for stride."),
-                (110, float('inf'), "significantly low heel kick", "back knee is too open on foot landing."),
-                ("default", "excellent heel kick", "Keep up this heel kick in your back knee for each stride in your training.")
+                (float('-inf'), 60, "showing excessive heel kick", "Try to open up your back knee more when landing your foot."),
+                (60, 80, "heel kick angle tighter than optimal", "Slightly open up your back knee more during foot landing."),
+                (80, 120, "showing excellent heel kick", "Keep up this optimal heel kick in your back knee for each stride."),
+                (120, 140, "slightly low heel kick", "Allow for a slightly tighter heel kick for better stride efficiency."),
+                (140, float('inf'), "showing very low heel kick", "Back knee is too open on foot landing - try for more heel kick."),
+                ("default", "positioned", "Continue monitoring your heel kick.")
             ]
         },
         "foot_strike": {
             "thresholds": [
                 (float('-inf'), 0, "landing too far forward on your toes", "Land more on your midfoot rather than your forefoot."),
-                (0, 5, "landing on your forefoot", "Try to land a bit more toward your midfoot."),
+                (0, 5, "landing slightly forward of optimal", "Try to land a bit more toward your midfoot."),
+                (5, 10, "landing well on your midfoot", "Excellent foot strike pattern! This is optimal for efficiency."),
                 (10, 15, "landing with a slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
                 (15, float('inf'), "landing on your heel", "Try to land more on your midfoot directly under your center of gravity."),
-                ("default", "landing well on your midfoot", "Excellent foot strike pattern! This is optimal for efficiency.")
+                ("default", "positioned", "Continue monitoring your foot strike pattern.")
             ]
         }
     }

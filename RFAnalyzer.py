@@ -5,9 +5,9 @@ class RFAnalyzer:
         self.ideal_angles = {
             "head_position": {"min": 10, "max": 20, "tolerance": 4},
             "back_position": {"min": 0, "max": 5, "tolerance": 15},
-            "arm_flexion": {"min": 75, "max": 85, "tolerance": 5},
-            "left_knee": {"min": 90, "max": 100, "tolerance": 15},
-            "right_knee": {"min": 130, "max": 160, "tolerance": 9},
+            "arm_flexion": {"min": 70, "max": 90, "tolerance": 15},
+            "left_knee": {"min": 80, "max": 120, "tolerance": 20},
+            "right_knee": {"min": 120, "max": 170, "tolerance": 20},
             "foot_strike": {"min": 5, "max": 10, "tolerance": 5},
         }
 

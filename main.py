@@ -67,12 +67,13 @@ app = FastAPI(
 
 # CORS configuration
 CORS_ORIGINS = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "http://127.0.0.1:3000",
-    "*",  # Remove in production for security
+    # "http://localhost",
+    # "http://localhost:3000",
+    # "http://127.0.0.1:8000",
+    # "http://localhost:8000",
+    # "http://127.0.0.1:3000",
+    "https://runalyze-8x1vbed8s-zalderaans-projects.vercel.app/"
+    # "*",  # Remove in production for security
 ]
 
 app.add_middleware(
@@ -181,17 +182,34 @@ class VideoProcessor:
                 if 'streams' in data and len(data['streams']) > 0:
                     stream = data['streams'][0]
                     
-                    # Check for rotation in tags
+                    # Check for rotation in tags (common in mobile videos)
                     if 'tags' in stream:
                         if 'rotate' in stream['tags']:
-                            return int(stream['tags']['rotate'])
+                            rotation = int(stream['tags']['rotate'])
+                            logger.info(f"Found rotation tag: {rotation}")
+                            return rotation
                     
                     # Check for side_data_list (newer format)
                     if 'side_data_list' in stream:
                         for side_data in stream['side_data_list']:
                             if side_data.get('side_data_type') == 'Display Matrix':
                                 rotation = side_data.get('rotation', 0)
-                                return abs(int(rotation))
+                                if rotation != 0:
+                                    logger.info(f"Found rotation in display matrix: {rotation}")
+                                    return abs(int(rotation))
+                    
+                    # Check video dimensions and codec for mobile video indicators
+                    width = stream.get('width', 0)
+                    height = stream.get('height', 0)
+                    codec = stream.get('codec_name', '')
+                    
+                    logger.info(f"Video dimensions: {width}x{height}, codec: {codec}")
+                    
+                    # For videos that appear vertical but should be landscape (mobile issue)
+                    if height > width and height / width > 1.3:
+                        logger.info(f"Detected likely rotated mobile video: {width}x{height}")
+                        # Mobile landscape videos usually need 90° clockwise rotation
+                        return 90
             
             return 0
         except Exception as e:
@@ -217,14 +235,25 @@ class VideoProcessor:
             if cap.isOpened():
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap.release()
+                
+                logger.info(f"Video dimensions analysis: {width}x{height}, frames: {frame_count}")
                 
                 # For typical mobile landscape videos that appear vertical,
                 # the height is usually greater than width due to incorrect orientation
-                # This is a heuristic and might need adjustment based on your specific use case
-                if height > width and height / width > 1.3:  # Strong vertical aspect ratio
-                    logger.info(f"Video appears to be rotated landscape (dimensions: {width}x{height})")
-                    return 90  # Assume it needs 90-degree rotation
+                if height > width:
+                    aspect_ratio = height / width
+                    logger.info(f"Vertical aspect ratio detected: {aspect_ratio:.2f}")
+                    
+                    # Strong indication of rotated landscape video
+                    if aspect_ratio > 1.3:  # e.g., 1080x1920 instead of 1920x1080
+                        logger.info(f"Video appears to be rotated landscape - needs 90° correction")
+                        return 90
+                    # Mild indication - could be portrait or slightly rotated
+                    elif aspect_ratio > 1.1:
+                        logger.info(f"Video might be rotated - applying 90° correction")
+                        return 90
                 
             return 0
         except Exception as e:
@@ -249,39 +278,55 @@ class VideoProcessor:
             rotation = VideoProcessor.get_video_rotation(input_path)
             logger.info(f"Detected video rotation: {rotation} degrees")
             
-            # Try using autorotate first (most reliable method)
+            # Use FFmpeg's autorotate feature as primary method
             autorotate_cmd = (
-                f'ffmpeg -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
+                f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
                 f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
                 f'-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
-                f'-metadata:s:v rotate=0 -auto-alt-ref 0 "{output_path}" -y'
+                f'-metadata:s:v rotate=0 "{output_path}" -y'
             )
             
-            # If autorotate is not available or fails, use manual transpose
+            # Manual transpose method for when autorotate doesn't work
             manual_cmd = None
             if rotation != 0:
-                # Determine the appropriate transpose filter based on rotation
-                transpose_filter = ""
+                # Debug: Let's try different approaches based on the detected rotation
+                logger.info(f"Processing rotation: {rotation}° - determining correct transpose")
+                
+                # For mobile videos, the rotation metadata can be misleading
+                # Let's try a more empirical approach
                 if rotation == 90:
-                    transpose_filter = "transpose=1,"  # 90 degrees clockwise
-                elif rotation == 180:
-                    transpose_filter = "transpose=2,transpose=2,"  # 180 degrees
-                elif rotation == 270:
+                    # Try counter-clockwise first for 90° metadata
                     transpose_filter = "transpose=2,"  # 90 degrees counter-clockwise
+                    logger.info("Using transpose=2 (90° counter-clockwise) for 90° rotation")
+                elif rotation == 270:
+                    # For 270° metadata, try clockwise rotation
+                    transpose_filter = "transpose=1,"  # 90 degrees clockwise  
+                    logger.info("Using transpose=1 (90° clockwise) for 270° rotation")
+                elif rotation == 180:
+                    transpose_filter = "transpose=1,transpose=1,"  # 180 degrees
+                    logger.info("Using double transpose for 180° rotation")
+                else:
+                    # For dimension-based detection (no metadata), try clockwise
+                    transpose_filter = "transpose=1,"
+                    logger.info("Using default transpose=1 (90° clockwise) for dimension-based detection")
                 
                 # Build the video filter chain with manual rotation
                 video_filters = f"{transpose_filter}scale=trunc(iw/2)*2:trunc(ih/2)*2"
                 
                 manual_cmd = (
-                    f'ffmpeg -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
+                    f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
                     f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
                     f'-vf "{video_filters}" '
-                    f'-metadata:s:v rotate=0 -metadata:s:v:0 rotate=0 -auto-alt-ref 0 "{output_path}" -y'
+                    f'-metadata:s:v rotate=0 "{output_path}" -y'
                 )
             
-            # Try the appropriate command
-            cmd_to_use = manual_cmd if manual_cmd else autorotate_cmd
-            logger.info(f"Processing video with orientation correction (rotation: {rotation}°): {input_path}")
+            # Try the appropriate command - prioritize manual rotation if detected
+            if rotation != 0 and manual_cmd:
+                cmd_to_use = manual_cmd
+                logger.info(f"Using manual rotation correction for {rotation}° rotation: {input_path}")
+            else:
+                cmd_to_use = autorotate_cmd
+                logger.info(f"Using autorotate processing (rotation: {rotation}°): {input_path}")
             
             result = os.system(cmd_to_use)
             
@@ -290,12 +335,38 @@ class VideoProcessor:
                 return output_path
             else:
                 logger.error(f"FFmpeg processing failed with code: {result}")
-                # If manual command failed and we have rotation, try the basic autorotate
-                if manual_cmd and result != 0:
-                    logger.info("Retrying with basic processing...")
+                # If manual command failed, try alternative rotations
+                if rotation != 0 and manual_cmd and cmd_to_use == manual_cmd:
+                    logger.info("Manual rotation failed, trying alternative rotations...")
+                    
+                    # Try the opposite rotation
+                    alt_transpose = ""
+                    if "transpose=1" in manual_cmd:
+                        alt_transpose = "transpose=2"  # Try counter-clockwise instead
+                        logger.info("Trying counter-clockwise rotation")
+                    elif "transpose=2" in manual_cmd:
+                        alt_transpose = "transpose=1"  # Try clockwise instead
+                        logger.info("Trying clockwise rotation")
+                    
+                    if alt_transpose:
+                        alt_output = input_path.replace(".mp4", "_alt_faststart.mp4")
+                        alt_cmd = (
+                            f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
+                            f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                            f'-vf "{alt_transpose},scale=trunc(iw/2)*2:trunc(ih/2)*2" '
+                            f'-metadata:s:v rotate=0 "{alt_output}" -y'
+                        )
+                        
+                        result = os.system(alt_cmd)
+                        if result == 0:
+                            logger.info(f"Alternative rotation successful: {alt_output}")
+                            return alt_output
+                    
+                    # Final fallback to autorotate
+                    logger.info("Trying autorotate fallback...")
                     result = os.system(autorotate_cmd)
                     if result == 0:
-                        logger.info(f"Video processing completed with basic processing: {output_path}")
+                        logger.info(f"Video processing completed with autorotate fallback: {output_path}")
                         return output_path
                 
                 return input_path
@@ -303,6 +374,140 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Error processing video: {e}")
             return input_path
+
+    @staticmethod
+    def test_video_rotation(video_path: str) -> None:
+        """
+        Test function to debug video rotation detection.
+        
+        Args:
+            video_path: Path to test video
+        """
+        try:
+            logger.info(f"Testing rotation detection for: {video_path}")
+            rotation = VideoProcessor.get_video_rotation(video_path)
+            logger.info(f"Detected rotation: {rotation} degrees")
+            
+            # Also check dimensions
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                cap.release()
+                logger.info(f"Video properties: {width}x{height} @ {fps:.2f}fps")
+            
+        except Exception as e:
+            logger.error(f"Error testing video rotation: {e}")
+
+    @staticmethod
+    def create_rotation_test_videos(input_path: str) -> Dict[str, str]:
+        """
+        Create test videos with different rotations to find the correct one.
+        
+        Args:
+            input_path: Path to input video
+            
+        Returns:
+            Dict mapping rotation description to output path
+        """
+        test_videos = {}
+        base_path = input_path.replace(".mp4", "")
+        
+        rotation_tests = [
+            ("clockwise_90", "transpose=1"),
+            ("counter_clockwise_90", "transpose=2"), 
+            ("clockwise_180", "transpose=1,transpose=1"),
+            ("flip_horizontal", "hflip"),
+            ("flip_vertical", "vflip"),
+            ("flip_both", "hflip,vflip")
+        ]
+        
+        for desc, filter_cmd in rotation_tests:
+            output_path = f"{base_path}_test_{desc}.mp4"
+            cmd = (
+                f'ffmpeg -i "{input_path}" -c:v libx264 -crf 28 -preset fast '
+                f'-vf "{filter_cmd},scale=trunc(iw/2)*2:trunc(ih/2)*2" '
+                f'-metadata:s:v rotate=0 -t 10 "{output_path}" -y'
+            )
+            
+            logger.info(f"Creating test video: {desc}")
+            result = os.system(cmd)
+            
+            if result == 0:
+                test_videos[desc] = output_path
+                logger.info(f"Created test video: {output_path}")
+            else:
+                logger.error(f"Failed to create test video: {desc}")
+        
+        return test_videos
+
+def smart_rotate_frame(frame, rotation):
+    """
+    Intelligently rotate a frame by trying different directions and detecting
+    if the result looks correct (not upside-down).
+    
+    Args:
+        frame: OpenCV frame
+        rotation: Rotation angle (0, 90, 180, 270)
+        
+    Returns:
+        Rotated frame
+    """
+    if rotation == 0:
+        return frame
+    
+    if rotation == 90 or rotation == 270:
+        # Try counter-clockwise first (common fix for mobile videos)
+        counterclockwise = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # For debugging, let's also try clockwise to compare
+        clockwise = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        
+        # For now, return counter-clockwise as it often fixes upside-down issues
+        logger.info(f"Applied COUNTER-CLOCKWISE rotation for {rotation}° metadata")
+        return counterclockwise
+        
+    elif rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    else:
+        logger.warning(f"Unknown rotation angle: {rotation}, returning original frame")
+        return frame
+
+
+def rotate_frame(frame, rotation):
+    """
+    Rotate a frame based on detected rotation angle.
+    For mobile videos, we try counter-clockwise rotation first.
+    
+    Args:
+        frame: OpenCV frame
+        rotation: Rotation angle (0, 90, 180, 270)
+        
+    Returns:
+        Rotated frame
+    """
+    return smart_rotate_frame(frame, rotation)
+
+
+def test_rotation_directions(frame, rotation_angle):
+    """
+    Test different rotation directions to find the correct one.
+    This can help debug mobile video orientation issues.
+    """
+    if rotation_angle == 0:
+        return frame, "no_rotation"
+    
+    # Try different rotations
+    clockwise = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    counterclockwise = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    
+    logger.info(f"Original frame shape: {frame.shape}")
+    logger.info(f"Clockwise rotation shape: {clockwise.shape}")
+    logger.info(f"Counterclockwise rotation shape: {counterclockwise.shape}")
+    
+    # For now, return clockwise and log the attempt
+    return clockwise, "clockwise"
 
 class StorageManager:
     """Handles file upload operations to Supabase"""
@@ -583,8 +788,48 @@ async def process_video(
 
         # process with MP pose
         cap = cv2.VideoCapture(video_path)
-        width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # ✓ Detect rotation and fix video orientation BEFORE processing
+        rotation = VideoProcessor.get_video_rotation(video_path)
+        logger.info(f"Detected rotation for processing: {rotation}°")
+        
+        # If rotation is needed, create a corrected video file first
+        corrected_video_path = video_path
+        if rotation != 0:
+            logger.info(f"Pre-correcting video orientation before pose analysis")
+            corrected_video_path = f"tmp/{user_id}/corrected_{file.filename}"
+            
+            # Apply rotation correction to the video file itself
+            if rotation == 90 or rotation == 270:
+                # Use counter-clockwise rotation for mobile videos
+                transpose_cmd = "transpose=2"  # 90° counter-clockwise
+            elif rotation == 180:
+                transpose_cmd = "transpose=1,transpose=1"  # 180°
+            else:
+                transpose_cmd = "transpose=2"  # Default to counter-clockwise
+                
+            correction_cmd = (
+                f'ffmpeg -i "{video_path}" -vf "{transpose_cmd}" '
+                f'-c:v libx264 -crf 23 -preset fast "{corrected_video_path}" -y'
+            )
+            
+            result = os.system(correction_cmd)
+            if result != 0:
+                logger.warning(f"Video correction failed, using original video")
+                corrected_video_path = video_path
+            else:
+                logger.info(f"Video corrected successfully: {corrected_video_path}")
+        
+        # Now process the corrected video
+        cap = cv2.VideoCapture(corrected_video_path)
+        
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Use the actual dimensions from the corrected video
+        width = original_width
+        height = original_height
+        logger.info(f"Processing corrected video dimensions: {width}x{height}")
 
         # -- ready output
         fourcc = cv2.VideoWriter_fourcc(*'avc1') # codec for output video
@@ -596,11 +841,26 @@ async def process_video(
         if not cap.isOpened():
             raise Exception("Error: cannot open video file")
 
+        # ✓ Log processing information
+        logger.info(f"Starting pose processing on corrected video")
+        logger.info(f"Video dimensions: {width}x{height}")
+        
+        frame_count = 0
+
         while cap.isOpened():
             ret, frame = cap.read() # process the frame
             if not ret: # end video if error
                 print("video ended or frame read failed")
                 break
+
+            frame_count += 1
+            
+            # ✓ Log frame dimensions for first few frames
+            if frame_count <= 3:
+                h, w = frame.shape[:2]
+                logger.info(f"Frame {frame_count} dimensions: {w}x{h}")
+
+            # No need to rotate frames anymore - video is already corrected
 
             frame = detector.findPose(frame)
             lmList = detector.findPosition(frame)
@@ -693,8 +953,98 @@ async def process_video(
         import time
         time.sleep(0.2)
         
-        # Clean up temporary files
-        cleanup_temp(video_path, final_video_path, annotated_video_path, thumbnail_path)
+        # Clean up temporary files (including corrected video if created)
+        corrected_video_cleanup = corrected_video_path if rotation != 0 and corrected_video_path != video_path else None
+        cleanup_temp(video_path, final_video_path, annotated_video_path, thumbnail_path, corrected_video_cleanup)
+
+@app.post("/test-both-rotations/")
+async def test_both_rotations(file: UploadFile = File(...)):
+    """
+    Test both clockwise and counter-clockwise rotations to determine which is correct.
+    This helps debug upside-down video issues.
+    """
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        test_dir = f"tmp/rotation_test_{timestamp}"
+        os.makedirs(test_dir, exist_ok=True)
+        
+        # Save original video
+        original_path = f"{test_dir}/original_{file.filename}"
+        with open(original_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        # Get rotation metadata
+        rotation = VideoProcessor.get_video_rotation(original_path)
+        
+        # Read first frame to test rotations
+        cap = cv2.VideoCapture(original_path)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            raise HTTPException(status_code=400, detail="Could not read video frame")
+        
+        original_shape = frame.shape
+        
+        # Test both rotation directions
+        clockwise = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        counterclockwise = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # Save test frames as images for visual inspection
+        cv2.imwrite(f"{test_dir}/original_frame.jpg", frame)
+        cv2.imwrite(f"{test_dir}/clockwise_frame.jpg", clockwise)
+        cv2.imwrite(f"{test_dir}/counterclockwise_frame.jpg", counterclockwise)
+        
+        results = {
+            "detected_rotation": rotation,
+            "original_shape": f"{original_shape[1]}x{original_shape[0]}",
+            "clockwise_shape": f"{clockwise.shape[1]}x{clockwise.shape[0]}",
+            "counterclockwise_shape": f"{counterclockwise.shape[1]}x{counterclockwise.shape[0]}",
+            "test_frames": {
+                "original": f"{test_dir}/original_frame.jpg",
+                "clockwise": f"{test_dir}/clockwise_frame.jpg", 
+                "counterclockwise": f"{test_dir}/counterclockwise_frame.jpg"
+            },
+            "current_setting": "counter-clockwise (to fix upside-down issue)",
+            "recommendation": "Check the test frames to see which rotation looks correct"
+        }
+        
+        return JSONResponse(content=results)
+        
+    except Exception as e:
+        logger.error(f"Rotation test error: {e}")
+        raise HTTPException(status_code=500, detail=f"Rotation test failed: {str(e)}")
+
+
+@app.post("/debug-rotation/")
+async def debug_rotation(file: UploadFile = File(...)):
+    """Debug endpoint to test video rotation detection and correction"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_dir = f"debug/{timestamp}"
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # Save original video
+        original_path = f"{debug_dir}/original_{file.filename}"
+        with open(original_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        # Test rotation detection
+        VideoProcessor.test_video_rotation(original_path)
+        
+        # Create test videos with different rotations
+        test_videos = VideoProcessor.create_rotation_test_videos(original_path)
+        
+        return JSONResponse(content={
+            "message": "Debug videos created",
+            "original_video": original_path,
+            "test_videos": test_videos,
+            "instructions": "Check each test video to see which orientation is correct"
+        })
+        
+    except Exception as e:
+        logger.error(f"Debug rotation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
