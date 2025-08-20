@@ -193,7 +193,7 @@ class ProcessingStatus(Enum):
 class VideoConfig:
     """Video processing configuration"""
     fps: float = 30.0
-    codec: str = 'avc1'
+    codec: str = 'mp4v'
     thumbnail_timestamp: float = 1.0
     ffmpeg_crf: int = 28
     ffmpeg_preset: str = 'fast'
@@ -1338,7 +1338,7 @@ async def process_video(
         log_memory_usage("BEFORE_OUTPUT_WRITER_SETUP")
         
         # -- ready output
-        fourcc = cv2.VideoWriter_fourcc(*'avc1') # codec for output video
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # codec for output video
         out = cv2.VideoWriter(annotated_video_path, fourcc, 30.0, (width,height), isColor=True)
 
         prev_lmList = None
