@@ -10,6 +10,12 @@ import gc
 import time
 import threading
 import shutil
+from per_frame_memory_monitor import (
+    PerFrameMemoryMonitor, 
+    start_frame_memory_monitoring,
+    log_frame_memory,
+    stop_frame_memory_monitoring
+)
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -760,7 +766,7 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                                     processing_width, processing_height, 
                                     original_width, original_height, scale_factor, rotation=0):
     """
-    Stream-based video processing with memory optimization and immediate cleanup.
+    Stream-based video processing with enhanced per-frame memory optimization and monitoring.
     
     Args:
         cap: Video capture object
@@ -776,7 +782,7 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
         rotation: Rotation angle to apply per frame
         
     Returns:
-        Tuple: (frame_count, processed_count, processing_time)
+        Tuple: (frame_count, processed_count, processing_time, memory_stats)
     """
     frame_count = 0
     processed_count = 0
@@ -784,6 +790,14 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
     batch_size = 15  # Process in small batches for memory management
     
     logger.info(f"Starting optimized streaming processing: {processing_width}x{processing_height} -> {original_width}x{original_height}")
+    
+    # Start per-frame memory monitoring
+    frame_monitor = start_frame_memory_monitoring(
+        log_every_n_frames=25,  # Log every 25 frames
+        detailed_log_every_n_frames=100,  # Detailed log every 100 frames
+        memory_alert_threshold_mb=2000,  # Alert at 2GB
+        enable_tracemalloc=True
+    )
     
     try:
         while True:
@@ -807,10 +821,26 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                 current_frame_num = batch_start + i + 1
                 
                 try:
+                    # Log memory before frame processing
+                    log_frame_memory(
+                        current_frame_num, 
+                        total_frames, 
+                        "frame_start",
+                        {"batch_size": len(batch_frames), "batch_position": i}
+                    )
+                    
                     # Process frame with memory optimization and rotation
                     output_frame, lmList, analysis_data = process_frame_with_scaling(
                         frame, detector, processing_width, processing_height,
                         original_width, original_height, scale_factor, rotation
+                    )
+                    
+                    # Log memory after pose detection
+                    log_frame_memory(
+                        current_frame_num, 
+                        total_frames, 
+                        "pose_detection",
+                        {"landmarks_detected": len(lmList) > 0, "landmarks_count": len(lmList)}
                     )
                     
                     # Analyze frame if valid data
@@ -824,6 +854,14 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                         if contact_results and contact_results.get('right_landing', False):
                             analyzer.analyze_frame(analysis_data)
                             processed_count += 1
+                            
+                            # Log memory after analysis
+                            log_frame_memory(
+                                current_frame_num, 
+                                total_frames, 
+                                "analysis_complete",
+                                {"contact_detected": True, "processed_count": processed_count}
+                            )
                     
                     # Add frame number overlay for debugging
                     if not lmList:
@@ -832,6 +870,14 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                     
                     # Write to output immediately
                     out.write(output_frame)
+                    
+                    # Log memory after writing
+                    log_frame_memory(
+                        current_frame_num, 
+                        total_frames, 
+                        "frame_written",
+                        {"video_writing": True}
+                    )
                     
                     # Immediate cleanup
                     del output_frame
@@ -842,10 +888,27 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                     # Write original frame if processing fails
                     out.write(frame)
                     del frame
+                    
+                    # Log memory for failed frame
+                    log_frame_memory(
+                        current_frame_num, 
+                        total_frames, 
+                        "frame_error",
+                        {"error": str(e)}
+                    )
             
             # Clear batch from memory
             del batch_frames
             gc.collect()  # Force garbage collection after each batch
+            
+            # Log memory after batch cleanup
+            if frame_count > 0:
+                log_frame_memory(
+                    frame_count, 
+                    total_frames, 
+                    "batch_cleanup",
+                    {"batch_completed": True, "gc_triggered": True}
+                )
             
             # Progress logging
             if frame_count % 50 == 0:
@@ -861,8 +924,19 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
     except Exception as e:
         logger.error(f"Error in streaming processing: {e}")
     
+    finally:
+        # Stop frame memory monitoring and get statistics
+        memory_stats = stop_frame_memory_monitoring()
+        
+        # Export detailed memory analysis
+        if frame_count > 0:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            memory_export_path = f"tmp/memory_analysis_{timestamp}.json"
+            frame_monitor.export_frame_data(memory_export_path)
+            logger.info(f"📊 Detailed memory analysis exported to: {memory_export_path}")
+    
     processing_time = (datetime.now() - start_time).total_seconds()
-    return frame_count, processed_count, processing_time
+    return frame_count, processed_count, processing_time, memory_stats
 
 def immediate_resource_cleanup(*objects):
     """
@@ -1366,16 +1440,18 @@ async def process_video(
         video_info = f"{width}x{height}, {total_frames}f, {duration_seconds:.1f}s, scale: {scale_factor:.2f}"
         log_memory_usage("PROCESSING_START", f"Optimized processing: {video_info}")
 
-        # Use optimized streaming processing
-        frame_count, processed_frames, processing_time = process_video_streaming_optimized(
+        # Use optimized streaming processing with per-frame memory monitoring
+        frame_count, processed_frames, processing_time, memory_stats = process_video_streaming_optimized(
             cap, out, detector, analyzer, total_frames,
             processing_width, processing_height, 
             original_width, original_height, scale_factor, rotation
         )
         
         processing_stats = f"{frame_count} frames, {processed_frames} analyzed, {processing_time:.1f}s total"
+        memory_summary = f"Peak: {memory_stats.get('summary', {}).get('peak_memory_mb', 0):.1f}MB, Avg FPS: {memory_stats.get('summary', {}).get('average_fps', 0):.1f}"
         print(f"=== OPTIMIZED PROCESSING COMPLETE: {processing_stats} ===")
-        log_memory_usage("PROCESSING_COMPLETE", processing_stats)
+        print(f"=== MEMORY STATISTICS: {memory_summary} ===")
+        log_memory_usage("PROCESSING_COMPLETE", f"{processing_stats}, {memory_summary}")
 
         # === STAGE 9: ANALYSIS SUMMARY ===
         print("=== STAGE 9: GENERATING ANALYSIS SUMMARY ===")
