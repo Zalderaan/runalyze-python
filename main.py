@@ -271,7 +271,7 @@ class VideoProcessor:
     @staticmethod
     def extract_thumbnail(video_path: str, output_path: str, timestamp: float = 1.0) -> bool:
         """
-        Extract a thumbnail from a video at specified timestamp.
+        Extract a thumbnail from a video at specified timestamp with rotation correction.
         
         Args:
             video_path: Path to input video
@@ -283,6 +283,10 @@ class VideoProcessor:
         """
         cap = None
         try:
+            # First detect rotation for this video
+            rotation = VideoProcessor.get_video_rotation(video_path)
+            logger.info(f"Thumbnail extraction - detected rotation: {rotation}°")
+            
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 logger.error(f"Failed to open video file: {video_path}")
@@ -296,9 +300,14 @@ class VideoProcessor:
                 logger.error(f"Cannot read frame at timestamp {timestamp}s")
                 return False
             
+            # Apply rotation correction to the thumbnail frame
+            if rotation != 0:
+                logger.info(f"Applying {rotation}° rotation to thumbnail")
+                frame = smart_rotate_frame(frame, rotation)
+            
             success = cv2.imwrite(output_path, frame)
             if success:
-                logger.info(f"Thumbnail extracted successfully: {output_path}")
+                logger.info(f"Thumbnail extracted successfully with rotation correction: {output_path}")
                 return True
             else:
                 logger.error(f"Failed to save thumbnail to: {output_path}")
@@ -308,16 +317,9 @@ class VideoProcessor:
             logger.error(f"Error extracting thumbnail: {e}")
             return False
         finally:
-            log_memory_usage("END")
-            
-            # Get memory allocation stats
-            current, peak = tracemalloc.get_traced_memory()
-            logger.info(f"TRACEMALLOC - Current: {current / (1024**2):.1f}MB, Peak: {peak / (1024**2):.1f}MB")
-            tracemalloc.stop()
-
             if cap:
                 cap.release()
-
+                
     @staticmethod
     def get_video_rotation(video_path: str) -> int:
         """
@@ -342,33 +344,46 @@ class VideoProcessor:
                 if 'streams' in data and len(data['streams']) > 0:
                     stream = data['streams'][0]
                     
+                    # First, check for explicit rotation metadata
+                    rotation_found = False
+                    detected_rotation = 0
+                    
                     # Check for rotation in tags (common in mobile videos)
                     if 'tags' in stream:
                         if 'rotate' in stream['tags']:
-                            rotation = int(stream['tags']['rotate'])
-                            logger.info(f"Found rotation tag: {rotation}")
-                            return rotation
+                            detected_rotation = int(stream['tags']['rotate'])
+                            rotation_found = True
+                            logger.info(f"Found rotation tag: {detected_rotation}")
                     
                     # Check for side_data_list (newer format)
-                    if 'side_data_list' in stream:
+                    if not rotation_found and 'side_data_list' in stream:
                         for side_data in stream['side_data_list']:
                             if side_data.get('side_data_type') == 'Display Matrix':
                                 rotation = side_data.get('rotation', 0)
                                 if rotation != 0:
-                                    logger.info(f"Found rotation in display matrix: {rotation}")
-                                    return abs(int(rotation))
+                                    detected_rotation = abs(int(rotation))
+                                    rotation_found = True
+                                    logger.info(f"Found rotation in display matrix: {detected_rotation}")
+                                    break
                     
-                    # Check video dimensions and codec for mobile video indicators
+                    # If we found rotation metadata, use it and don't try to guess
+                    if rotation_found:
+                        logger.info(f"Using metadata rotation: {detected_rotation}°")
+                        return detected_rotation
+                    
+                    # Only use dimension-based detection if NO rotation metadata exists
                     width = stream.get('width', 0)
                     height = stream.get('height', 0)
                     codec = stream.get('codec_name', '')
                     
                     logger.info(f"Video dimensions: {width}x{height}, codec: {codec}")
+                    logger.info("No rotation metadata found, checking dimensions...")
                     
                     # For videos that appear vertical but should be landscape (mobile issue)
+                    # Only apply this if there's NO existing rotation metadata
                     if height > width and height / width > 1.3:
                         logger.info(f"Detected likely rotated mobile video: {width}x{height}")
-                        # Mobile landscape videos usually need 90° clockwise rotation
+                        logger.info("Applying 90° rotation for mobile video without metadata")
                         return 90
             
             return 0
@@ -1511,14 +1526,13 @@ async def process_video(
         else:
             width = original_width
             height = original_height
-        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         duration_seconds = total_frames / fps if fps > 0 else 0
         
-        # Use the actual dimensions from the corrected video
-        width = original_width
-        height = original_height
+        # DON'T overwrite the corrected dimensions - keep the calculated width/height
+        logger.info(f"Final output video dimensions: {width}x{height} (rotation: {rotation}°)")
         
         video_info = f"{width}x{height}, {total_frames}f, {duration_seconds:.1f}s"
         logger.info(f"Processing corrected video dimensions: {width}x{height}")
@@ -1736,7 +1750,20 @@ async def process_video(
             pass
         
         # Enhanced cleanup with retry logic
+        # TODO: Temporarily disabled cleanup for debugging - re-enable for production
         cleanup_temp_enhanced(*cleanup_files)
+        
+        # Log files that would be cleaned up for debugging
+        logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
+        logger.info("Files that would be cleaned up:")
+        for file_path in cleanup_files:
+            if os.path.exists(file_path):
+                logger.info(f"  EXISTS: {file_path}")
+            else:
+                logger.info(f"  MISSING: {file_path}")
+        logger.info("=== END CLEANUP DEBUG INFO ===")
+        
+        # Keep files for inspection, but still do memory cleanup
         
         # Memory cleanup after file operations
         gc.collect()
@@ -1752,9 +1779,12 @@ async def process_video(
                         files_in_dir.extend([os.path.join(root, f) for f in files])
                     
                     if len(files_in_dir) > 5:  # Too many leftover files
+                        # TODO: Temporarily disabled user folder cleanup for debugging
                         logger.warning(f"Many leftover files detected for user {user_id}, cleaning up folder")
                         cleanup_user_tmp_folder(user_id)
                         gc.collect()
+                        logger.info(f"CLEANUP DISABLED: Found {len(files_in_dir)} files for user {user_id}, but cleanup disabled for debugging")
+                        logger.info(f"Files in user directory: {[os.path.basename(f) for f in files_in_dir]}")
         except Exception as e:
             logger.error(f"Error in user directory cleanup: {e}")
         
