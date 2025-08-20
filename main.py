@@ -423,7 +423,20 @@ class VideoProcessor:
     @staticmethod
     def add_faststart(input_path: str) -> str:
         """
-        Add faststart metadata to video for web streaming with proper orientation correction.
+        Add faststart metadata to video for web streaming with Render.com optimizations.
+        
+        AVC/H.264 Optimization Strategy:
+        - Primary: libx264 with ultrafast preset and baseline profile
+        - Fallback 1: Even faster H.264 with veryfast + zerolatency
+        - Final: Stream copy (no re-encoding)
+        
+        Render.com Optimizations:
+        - CRF 32 (good compression/speed balance)
+        - ultrafast preset (fastest H.264 encoding)
+        - baseline profile (maximum compatibility)
+        - fastdecode tune (optimized for playback)
+        - Limited threads (2 → 1 for fallbacks)
+        - Progressive timeouts: 60s → 30s → 15s
         
         Args:
             input_path: Path to input video
@@ -437,11 +450,13 @@ class VideoProcessor:
             # Detect video rotation
             rotation = VideoProcessor.get_video_rotation(input_path)
             logger.info(f"Detected video rotation: {rotation} degrees")
+            logger.info("Using Render.com optimized FFmpeg settings: AVC (H.264) with fast encoding")
             
-            # Use FFmpeg's autorotate feature as primary method
+            # Use AVC (H.264) with optimized settings for Render.com
             autorotate_cmd = (
-                f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
-                f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 '
+                f'-crf 32 -preset ultrafast -tune fastdecode -profile:v baseline '
+                f'-movflags +faststart -threads 2 -max_muxing_queue_size 1024 '
                 f'-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
                 f'-metadata:s:v rotate=0 "{output_path}" -y'
             )
@@ -470,12 +485,13 @@ class VideoProcessor:
                     transpose_filter = "transpose=1,"
                     logger.info("Using default transpose=1 (90° clockwise) for dimension-based detection")
                 
-                # Build the video filter chain with manual rotation
+                # Build the video filter chain with manual rotation (AVC optimized)
                 video_filters = f"{transpose_filter}scale=trunc(iw/2)*2:trunc(ih/2)*2"
                 
                 manual_cmd = (
-                    f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
-                    f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                    f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 '
+                    f'-crf 32 -preset ultrafast -tune fastdecode -profile:v baseline '
+                    f'-movflags +faststart -threads 2 -max_muxing_queue_size 1024 '
                     f'-vf "{video_filters}" '
                     f'-metadata:s:v rotate=0 "{output_path}" -y'
                 )
@@ -488,13 +504,77 @@ class VideoProcessor:
                 cmd_to_use = autorotate_cmd
                 logger.info(f"Using autorotate processing (rotation: {rotation}°): {input_path}")
             
-            result = os.system(cmd_to_use)
-            
-            if result == 0:
-                logger.info(f"Video processing completed with orientation fix: {output_path}")
-                return output_path
-            else:
-                logger.error(f"FFmpeg processing failed with code: {result}")
+            # Execute with timeout for Render.com (max 60 seconds for FFmpeg)
+            try:
+                result = subprocess.run(
+                    cmd_to_use, 
+                    shell=True, 
+                    timeout=60,  # 60 second timeout
+                    capture_output=True, 
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    logger.info(f"Video processing completed with orientation fix: {output_path}")
+                    return output_path
+                else:
+                    logger.error(f"FFmpeg processing failed with code: {result.returncode}")
+                    logger.error(f"FFmpeg error: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, cmd_to_use)
+                    
+            except subprocess.TimeoutExpired:
+                logger.warning("AVC encoding timed out after 60 seconds, trying faster fallbacks")
+                
+                # Fallback 1: Even faster H.264 encoding
+                faster_h264_cmd = (
+                    f'ffmpeg -i "{input_path}" -c:v libx264 '
+                    f'-crf 35 -preset veryfast -tune zerolatency -profile:v baseline '
+                    f'-movflags +faststart -threads 1 -max_muxing_queue_size 512 '
+                    f'-metadata:s:v rotate=0 "{output_path}" -y'
+                )
+                
+                try:
+                    result = subprocess.run(
+                        faster_h264_cmd, 
+                        shell=True, 
+                        timeout=30,
+                        capture_output=True, 
+                        text=True
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"Faster H.264 fallback completed: {output_path}")
+                        return output_path
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    logger.warning("Faster H.264 fallback also failed/timed out")
+                
+                # Fallback 2: Stream copy only (no re-encoding)
+                copy_fallback_cmd = (
+                    f'ffmpeg -i "{input_path}" -c copy -movflags +faststart '
+                    f'-metadata:s:v rotate=0 "{output_path}" -y'
+                )
+                
+                try:
+                    result = subprocess.run(
+                        copy_fallback_cmd, 
+                        shell=True, 
+                        timeout=15,
+                        capture_output=True, 
+                        text=True
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"Stream copy fallback completed: {output_path}")
+                        return output_path
+                    else:
+                        logger.error("Stream copy fallback failed, returning original")
+                        return input_path
+                        
+                except subprocess.TimeoutExpired:
+                    logger.error("Even stream copy timed out, returning original video")
+                    return input_path
+                    
+            except subprocess.CalledProcessError:
                 # If manual command failed, try alternative rotations
                 if rotation != 0 and manual_cmd and cmd_to_use == manual_cmd:
                     logger.info("Manual rotation failed, trying alternative rotations...")
@@ -511,23 +591,62 @@ class VideoProcessor:
                     if alt_transpose:
                         alt_output = input_path.replace(".mp4", "_alt_faststart.mp4")
                         alt_cmd = (
-                            f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 -crf {video_config.ffmpeg_crf} '
-                            f'-preset {video_config.ffmpeg_preset} -movflags +faststart '
+                            f'ffmpeg -noautorotate -i "{input_path}" -c:v libx264 '
+                            f'-crf 32 -preset ultrafast -tune fastdecode -profile:v baseline '
+                            f'-movflags +faststart -threads 2 -max_muxing_queue_size 1024 '
                             f'-vf "{alt_transpose},scale=trunc(iw/2)*2:trunc(ih/2)*2" '
                             f'-metadata:s:v rotate=0 "{alt_output}" -y'
                         )
                         
-                        result = os.system(alt_cmd)
-                        if result == 0:
-                            logger.info(f"Alternative rotation successful: {alt_output}")
-                            return alt_output
+                        try:
+                            result = subprocess.run(
+                                alt_cmd, 
+                                shell=True, 
+                                timeout=45,  # Shorter timeout for alternative
+                                capture_output=True, 
+                                text=True
+                            )
+                            
+                            if result.returncode == 0:
+                                logger.info(f"Alternative rotation successful: {alt_output}")
+                                return alt_output
+                        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                            logger.warning("Alternative rotation also failed/timed out")
                     
-                    # Final fallback to autorotate
+                    # Final fallback to autorotate with timeout
                     logger.info("Trying autorotate fallback...")
-                    result = os.system(autorotate_cmd)
-                    if result == 0:
-                        logger.info(f"Video processing completed with autorotate fallback: {output_path}")
+                    try:
+                        result = subprocess.run(
+                            autorotate_cmd, 
+                            shell=True, 
+                            timeout=45,
+                            capture_output=True, 
+                            text=True
+                        )
+                        
+                        if result.returncode == 0:
+                            logger.info(f"Video processing completed with autorotate fallback: {output_path}")
+                            return output_path
+                    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                        logger.warning("Autorotate fallback also failed/timed out")
+                
+                # Final ultra-fast fallback
+                logger.info("All encoding attempts failed, trying copy-only fallback")
+                try:
+                    copy_cmd = f'ffmpeg -i "{input_path}" -c copy -movflags +faststart "{output_path}" -y'
+                    result = subprocess.run(
+                        copy_cmd, 
+                        shell=True, 
+                        timeout=20,
+                        capture_output=True, 
+                        text=True
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"Copy-only fallback successful: {output_path}")
                         return output_path
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    logger.error("Even copy-only fallback failed")
                 
                 return input_path
                 
