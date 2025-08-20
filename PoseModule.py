@@ -15,7 +15,7 @@ class PoseDetector():
         self.mp_draw = mp.solutions.drawing_utils
         self.pose = self.mp_pose.Pose(
                 static_image_mode = self.mode, 
-                model_complexity = 0, 
+                model_complexity = 2, 
                 smooth_landmarks = self.smooth, 
                 min_detection_confidence =  self.detectionCon, 
                 min_tracking_confidence =  self.trackCon

@@ -6,6 +6,10 @@ and comprehensive running form feedback using MediaPipe pose detection.
 """
 import psutil
 import tracemalloc
+import gc
+import time
+import threading
+import shutil
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +32,10 @@ from typing import Optional, Tuple, Dict, Any
 from dotenv import load_dotenv
 from dataclasses import dataclass
 from enum import Enum
+
+# Import analysis modules
+import PoseModule as pm
+import RFAnalyzer as rfa
 
 import PoseModule as pm
 import RFAnalyzer as rfa
@@ -651,6 +659,222 @@ def test_rotation_directions(frame, rotation_angle):
     # For now, return clockwise and log the attempt
     return clockwise, "clockwise"
 
+# Memory Optimization Functions
+def get_optimal_processing_size(original_width, original_height, max_memory_mb=400):
+    """
+    Dynamically scale video resolution based on available memory to reduce processing load.
+    
+    Args:
+        original_width: Original video width
+        original_height: Original video height
+        max_memory_mb: Maximum memory to use for frame processing
+        
+    Returns:
+        Tuple: (new_width, new_height, scale_factor)
+    """
+    # Calculate memory usage for full resolution (RGBA float32)
+    bytes_per_frame = original_width * original_height * 3 * 4  # RGB float
+    estimated_memory_mb = bytes_per_frame / (1024**2)
+    
+    if estimated_memory_mb <= max_memory_mb:
+        return original_width, original_height, 1.0
+    
+    # Calculate scale factor to fit within memory limit
+    scale_factor = (max_memory_mb / estimated_memory_mb) ** 0.5
+    new_width = int(original_width * scale_factor / 2) * 2  # Even numbers for video encoding
+    new_height = int(original_height * scale_factor / 2) * 2
+    
+    logger.info(f"Scaling video from {original_width}x{original_height} to {new_width}x{new_height} "
+               f"(scale: {scale_factor:.2f}) to reduce memory usage from {estimated_memory_mb:.1f}MB to {max_memory_mb}MB")
+    
+    return new_width, new_height, scale_factor
+
+def process_frame_with_scaling(frame, detector, processing_width, processing_height, 
+                              original_width, original_height, scale_factor, rotation=0):
+    """
+    Process frame at reduced resolution for memory efficiency, with optional rotation, then scale back for output.
+    
+    Args:
+        frame: Original frame
+        detector: Pose detector
+        processing_width: Width for processing
+        processing_height: Height for processing
+        original_width: Original frame width
+        original_height: Original frame height
+        scale_factor: Scaling factor applied
+        rotation: Rotation angle to apply (0, 90, 180, 270)
+        
+    Returns:
+        Tuple: (output_frame, lmList, analysis_data)
+    """
+    try:
+        # Apply rotation first if needed
+        if rotation != 0:
+            frame = smart_rotate_frame(frame, rotation)
+        
+        # Scale down for processing if needed
+        if scale_factor != 1.0:
+            processing_frame = cv2.resize(frame, (processing_width, processing_height))
+        else:
+            processing_frame = frame.copy()
+        
+        # Do pose detection on smaller frame
+        processing_frame = detector.findPose(processing_frame)
+        lmList = detector.findPosition(processing_frame)
+        
+        analysis_data = None
+        if lmList:
+            # Extract measurements (these work regardless of scale)
+            head_position = detector.findHeadPosition(processing_frame, draw=True)
+            back_position = detector.findTorsoLean(processing_frame, draw=True)
+            arm_flexion = detector.findAngle(processing_frame, 12, 14, 16, draw=True)
+            left_knee = detector.findKneeAngle(processing_frame, 23, 25, 27, draw=True)
+            right_knee = detector.findKneeAngle(processing_frame, 24, 26, 28, draw=True)
+            foot_strike = detector.findFootAngle(processing_frame, draw=True)
+            
+            # Check for valid measurements
+            if all(angle is not None for angle in [head_position, back_position, arm_flexion, left_knee, right_knee, foot_strike]):
+                analysis_data = [head_position, back_position, arm_flexion, left_knee, right_knee, foot_strike]
+        
+        # Scale back to original size for output
+        if scale_factor != 1.0:
+            output_frame = cv2.resize(processing_frame, (original_width, original_height))
+        else:
+            output_frame = processing_frame
+        
+        # Cleanup intermediate frame
+        if scale_factor != 1.0:
+            del processing_frame
+        
+        return output_frame, lmList, analysis_data
+        
+    except Exception as e:
+        logger.error(f"Error in process_frame_with_scaling: {e}")
+        return frame, None, None
+
+def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames, 
+                                    processing_width, processing_height, 
+                                    original_width, original_height, scale_factor, rotation=0):
+    """
+    Stream-based video processing with memory optimization and immediate cleanup.
+    
+    Args:
+        cap: Video capture object
+        out: Video writer object
+        detector: Pose detector
+        analyzer: Analysis object
+        total_frames: Total number of frames
+        processing_width: Width for processing
+        processing_height: Height for processing
+        original_width: Original frame width
+        original_height: Original frame height
+        scale_factor: Scaling factor
+        rotation: Rotation angle to apply per frame
+        
+    Returns:
+        Tuple: (frame_count, processed_count, processing_time)
+    """
+    frame_count = 0
+    processed_count = 0
+    start_time = datetime.now()
+    batch_size = 15  # Process in small batches for memory management
+    
+    logger.info(f"Starting optimized streaming processing: {processing_width}x{processing_height} -> {original_width}x{original_height}")
+    
+    try:
+        while True:
+            # Process in batches to manage memory
+            batch_frames = []
+            batch_start = frame_count
+            
+            # Read batch of frames
+            for i in range(batch_size):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                batch_frames.append(frame)
+                frame_count += 1
+            
+            if not batch_frames:
+                break
+            
+            # Process batch
+            for i, frame in enumerate(batch_frames):
+                current_frame_num = batch_start + i + 1
+                
+                try:
+                    # Process frame with memory optimization and rotation
+                    output_frame, lmList, analysis_data = process_frame_with_scaling(
+                        frame, detector, processing_width, processing_height,
+                        original_width, original_height, scale_factor, rotation
+                    )
+                    
+                    # Analyze frame if valid data
+                    if analysis_data:
+                        # Check for foot contact (simplified for now)
+                        if hasattr(detector, 'detectFootContact_Alternative'):
+                            contact_results = detector.detectFootContact_Alternative(output_frame, draw=True)
+                        else:
+                            contact_results = {"right_landing": current_frame_num % 2 == 0}
+                        
+                        if contact_results and contact_results.get('right_landing', False):
+                            analyzer.analyze_frame(analysis_data)
+                            processed_count += 1
+                    
+                    # Add frame number overlay for debugging
+                    if not lmList:
+                        cv2.putText(output_frame, "No pose detected", (50, 50), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    
+                    # Write to output immediately
+                    out.write(output_frame)
+                    
+                    # Immediate cleanup
+                    del output_frame
+                    del frame
+                    
+                except Exception as e:
+                    logger.error(f"Error processing frame {current_frame_num}: {e}")
+                    # Write original frame if processing fails
+                    out.write(frame)
+                    del frame
+            
+            # Clear batch from memory
+            del batch_frames
+            gc.collect()  # Force garbage collection after each batch
+            
+            # Progress logging
+            if frame_count % 50 == 0:
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                fps_processing = frame_count / elapsed_time if elapsed_time > 0 else 0
+                percent_complete = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+                estimated_remaining = ((total_frames - frame_count) / fps_processing) if fps_processing > 0 else 0
+                
+                progress_info = f"Frame {frame_count}/{total_frames} ({percent_complete:.1f}%), {fps_processing:.1f}fps, ETA: {estimated_remaining:.1f}s"
+                print(f"OPTIMIZED PROCESSING: {progress_info}")
+                log_memory_usage(f"STREAMING_BATCH_{frame_count//batch_size}", progress_info)
+    
+    except Exception as e:
+        logger.error(f"Error in streaming processing: {e}")
+    
+    processing_time = (datetime.now() - start_time).total_seconds()
+    return frame_count, processed_count, processing_time
+
+def immediate_resource_cleanup(*objects):
+    """
+    Immediately cleanup specified objects and force garbage collection.
+    
+    Args:
+        *objects: Objects to delete and cleanup
+    """
+    try:
+        for obj in objects:
+            if obj is not None:
+                del obj
+        gc.collect()  # Force garbage collection
+    except Exception as e:
+        logger.error(f"Error in immediate_resource_cleanup: {e}")
+
 class StorageManager:
     """Handles file upload operations to Supabase"""
     
@@ -1055,46 +1279,41 @@ async def process_video(
         
         log_memory_usage("AFTER_ROTATION_DETECTION", f"Rotation: {rotation}°")
         
-        # === STAGE 5: VIDEO CORRECTION (IF NEEDED) ===
-        corrected_video_path = video_path
-        if rotation != 0:
-            print(f"=== STAGE 5: CORRECTING VIDEO ROTATION ({rotation}°) ===")
-            log_memory_usage("BEFORE_VIDEO_CORRECTION")
-            
-            logger.info(f"Pre-correcting video orientation before pose analysis")
-            corrected_video_path = f"tmp/{user_id}/corrected_{file.filename}"
-            
-            # Apply rotation correction to the video file itself
-            if rotation == 90 or rotation == 270:
-                # Use counter-clockwise rotation for mobile videos
-                transpose_cmd = "transpose=2"  # 90° counter-clockwise
-            elif rotation == 180:
-                transpose_cmd = "transpose=1,transpose=1"  # 180°
-            else:
-                transpose_cmd = "transpose=2"  # Default to counter-clockwise
-                
-            correction_cmd = (
-                f'ffmpeg -i "{video_path}" -vf "{transpose_cmd}" '
-                f'-c:v libx264 -crf 23 -preset fast "{corrected_video_path}" -y'
-            )
-            
-            result = os.system(correction_cmd)
-            if result != 0:
-                logger.warning(f"Video correction failed, using original video")
-                corrected_video_path = video_path
-            else:
-                logger.info(f"Video corrected successfully: {corrected_video_path}")
-                corrected_size_mb = os.path.getsize(corrected_video_path) / (1024 * 1024)
-                log_memory_usage("AFTER_VIDEO_CORRECTION", f"Corrected video: {corrected_size_mb:.1f}MB")
+        # === STAGE 5: OPTIMIZED VIDEO SETUP (STREAM PROCESSING) ===
+        print("=== STAGE 5: SETTING UP STREAM PROCESSING ===")
+        log_memory_usage("BEFORE_STREAM_SETUP")
+        
+        # Instead of creating corrected video file, we'll apply rotation per frame
+        # This saves disk space and memory by avoiding temporary file creation
+        corrected_video_path = video_path  # Keep reference to original
+        apply_rotation_per_frame = rotation != 0
+        
+        if apply_rotation_per_frame:
+            logger.info(f"Will apply {rotation}° rotation per frame during streaming (no temp file)")
+        else:
+            logger.info("No rotation needed, processing original video directly")
+        
+        log_memory_usage("AFTER_STREAM_SETUP", f"Stream mode, rotation: {rotation}°")
         
         # === STAGE 6: VIDEO ANALYSIS SETUP ===
         print("=== STAGE 6: SETTING UP VIDEO ANALYSIS ===")
         log_memory_usage("BEFORE_VIDEO_ANALYSIS_SETUP")
         
-        # Now process the corrected video
-        cap = cv2.VideoCapture(corrected_video_path)
+        # Process the original video (rotation applied per frame)
+        cap = cv2.VideoCapture(video_path)
         
         original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Calculate corrected dimensions for output video
+        if apply_rotation_per_frame and (rotation == 90 or rotation == 270):
+            # For 90/270° rotation, swap width and height
+            width = original_height
+            height = original_width
+            logger.info(f"Output dimensions swapped for rotation: {width}x{height}")
+        else:
+            width = original_width
+            height = original_height
         original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -1126,81 +1345,32 @@ async def process_video(
 
         log_memory_usage("AFTER_OUTPUT_WRITER_SETUP")
 
-        # === STAGE 8: FRAME-BY-FRAME PROCESSING ===
-        print("=== STAGE 8: STARTING FRAME-BY-FRAME PROCESSING ===")
-        logger.info(f"Starting pose processing on corrected video")
-        logger.info(f"Video dimensions: {width}x{height}")
+        # === STAGE 8: MEMORY-OPTIMIZED PROCESSING ===
+        print("=== STAGE 8: STARTING MEMORY-OPTIMIZED PROCESSING ===")
         
-        frame_count = 0
-        processed_frames = 0
-        start_time = datetime.now()
-        log_memory_usage("PROCESSING_START", f"Starting {total_frames} frames")
+        # Get optimal processing resolution for memory efficiency
+        processing_width, processing_height, scale_factor = get_optimal_processing_size(
+            original_width, original_height, max_memory_mb=400
+        )
+        
+        logger.info(f"Video processing optimization:")
+        logger.info(f"  Original: {original_width}x{original_height}")
+        logger.info(f"  Processing: {processing_width}x{processing_height}")
+        logger.info(f"  Scale factor: {scale_factor:.3f}")
+        logger.info(f"  Output: {width}x{height}")
+        
+        video_info = f"{width}x{height}, {total_frames}f, {duration_seconds:.1f}s, scale: {scale_factor:.2f}"
+        log_memory_usage("PROCESSING_START", f"Optimized processing: {video_info}")
 
-        while cap.isOpened():
-            ret, frame = cap.read() # process the frame
-            if not ret: # end video if error
-                print("video ended or frame read failed")
-                break
-
-            frame_count += 1
-
-            # Enhanced memory logging every 50 frames with performance metrics
-            if frame_count % 50 == 0:
-                elapsed_time = (datetime.now() - start_time).total_seconds()
-                fps_processing = frame_count / elapsed_time if elapsed_time > 0 else 0
-                percent_complete = (frame_count / total_frames) * 100 if total_frames > 0 else 0
-                estimated_remaining = ((total_frames - frame_count) / fps_processing) if fps_processing > 0 else 0
-                
-                progress_info = f"Frame {frame_count}/{total_frames} ({percent_complete:.1f}%), {fps_processing:.1f}fps, ETA: {estimated_remaining:.1f}s"
-                print(f"PROCESSING: {progress_info}")
-                log_memory_usage(f"PROCESSING_FRAME_{frame_count}", progress_info)
-            
-            # ✓ Log frame dimensions for first few frames
-            if frame_count <= 3:
-                h, w = frame.shape[:2]
-                logger.info(f"Frame {frame_count} dimensions: {w}x{h}")
-
-            # No need to rotate frames anymore - video is already corrected
-
-            frame = detector.findPose(frame)
-            lmList = detector.findPosition(frame)
-            if lmList:
-                # extract angles per frame
-                head_position = detector.findHeadPosition(frame, draw=True)
-                back_position = detector.findTorsoLean(frame, draw=True)
-                arm_flexion = detector.findAngle(frame, 12, 14, 16, draw=True)
-                left_knee = detector.findKneeAngle(frame, 23, 25, 27, draw=True)
-                right_knee = detector.findKneeAngle(frame, 24, 26, 28, draw=True)
-                foot_strike = detector.findFootAngle(frame, draw=True)
-                
-                # Fallback for missing detectFootContact_Alternative method
-                if hasattr(detector, 'detectFootContact_Alternative'):
-                    contact_results = detector.detectFootContact_Alternative(frame, draw=True)
-                else:
-                    # Simple fallback - every other frame has foot contact
-                    contact_results = {"right_landing": frame_count % 2 == 0}
-                
-                # ✓ Add validation for None values
-                if all(angle is not None for angle in [head_position, back_position, arm_flexion, left_knee, right_knee, foot_strike]):
-                    if contact_results and contact_results.get('right_landing', False):
-                        frame_angles = [head_position, back_position, arm_flexion, 
-                                    left_knee, right_knee, foot_strike]
-                        analyzer.analyze_frame(frame_angles)  # Score this frame
-                        processed_frames += 1
-            else:
-                print("No landmarks detected in frame")
-                cv2.putText(frame, "No pose detected", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-            # After processing all frames:
-            out.write(frame) # write annotated frame to the output video
-
-            # press q to quit
-            if cv2.waitKey(10) & 0xFF == ord('q'):
-                break
-            
-        processing_time = (datetime.now() - start_time).total_seconds()
+        # Use optimized streaming processing
+        frame_count, processed_frames, processing_time = process_video_streaming_optimized(
+            cap, out, detector, analyzer, total_frames,
+            processing_width, processing_height, 
+            original_width, original_height, scale_factor, rotation
+        )
+        
         processing_stats = f"{frame_count} frames, {processed_frames} analyzed, {processing_time:.1f}s total"
-        print(f"=== FRAME PROCESSING COMPLETE: {processing_stats} ===")
+        print(f"=== OPTIMIZED PROCESSING COMPLETE: {processing_stats} ===")
         log_memory_usage("PROCESSING_COMPLETE", processing_stats)
 
         # === STAGE 9: ANALYSIS SUMMARY ===
@@ -1209,6 +1379,7 @@ async def process_video(
         
         summary = analyzer.get_summary()  # Get aggregated results
         print("Analysis summary:", summary)
+        
         
         log_memory_usage("AFTER_ANALYSIS_SUMMARY")
 
@@ -1316,21 +1487,33 @@ async def process_video(
         print(f"Full error details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
-        # Ensure resources are released even if there's an error
+        # === ENHANCED RESOURCE CLEANUP ===
+        print("=== STARTING ENHANCED CLEANUP ===")
+        log_memory_usage("CLEANUP_START")
+        
+        # Immediate resource release with error handling
         try:
             if 'cap' in locals() and cap:
                 cap.release()
+                cap = None
             if 'out' in locals() and out:
                 out.release()
+                out = None
             cv2.destroyAllWindows()
+            
+            # Force immediate cleanup of large objects
+            immediate_resource_cleanup(cap, out)
+            
         except Exception as e:
             logger.error(f"Error releasing video resources: {e}")
         
+        # Memory cleanup before file operations
+        gc.collect()
+        
         # Add delay before cleanup (important on Windows)
-        import time
         time.sleep(0.3)
         
-        # Build cleanup list with proper error handling
+        # Build comprehensive cleanup list
         cleanup_files = []
         
         # Add files that should always be cleaned up
@@ -1342,24 +1525,27 @@ async def process_video(
             cleanup_files.append(annotated_video_path)
         
         # Add conditional files
-        if 'final_video_path' in locals() and final_video_path:
+        if 'final_video_path' in locals() and final_video_path and final_video_path != annotated_video_path:
             cleanup_files.append(final_video_path)
         
         # Add corrected video if it was created and is different from original
         try:
             if 'rotation' in locals() and 'corrected_video_path' in locals():
-                if rotation != 0 and corrected_video_path != video_path:
+                if rotation != 0 and corrected_video_path != video_path and corrected_video_path not in cleanup_files:
                     cleanup_files.append(corrected_video_path)
         except:
             pass
         
-        # Use enhanced cleanup
+        # Enhanced cleanup with retry logic
         cleanup_temp_enhanced(*cleanup_files)
         
-        # Also try to clean up the entire user folder if processing failed
+        # Memory cleanup after file operations
+        gc.collect()
+        log_memory_usage("CLEANUP_FILES_COMPLETE")
+        
+        # Clean up user directory if too many leftover files
         try:
             if 'user_id' in locals() and user_id:
-                # Check if there are any leftover files
                 user_tmp_dir = f"tmp/{user_id}"
                 if os.path.exists(user_tmp_dir):
                     files_in_dir = []
@@ -1369,17 +1555,32 @@ async def process_video(
                     if len(files_in_dir) > 5:  # Too many leftover files
                         logger.warning(f"Many leftover files detected for user {user_id}, cleaning up folder")
                         cleanup_user_tmp_folder(user_id)
+                        gc.collect()
         except Exception as e:
-            logger.error(f"Error in additional cleanup: {e}")
+            logger.error(f"Error in user directory cleanup: {e}")
         
-        # Final memory tracking summary (if not already stopped)
+        # Final memory tracking and cleanup
         try:
             if hasattr(memory_tracker, 'memory_history') and memory_tracker.memory_history:
                 if len(memory_tracker.memory_history) > 0:  # Check if tracking is still active
                     final_summary = memory_tracker.stop_tracking()
                     logger.info(f"FINAL MEMORY SUMMARY: {final_summary}")
+                    
+                    # Log memory efficiency
+                    peak_memory = final_summary.get('peak_memory_mb', 0)
+                    total_increase = final_summary.get('total_increase_mb', 0)
+                    print(f"=== MEMORY EFFICIENCY REPORT ===")
+                    print(f"Peak Memory: {peak_memory}MB")
+                    print(f"Total Increase: {total_increase}MB")
+                    print(f"Memory Efficient: {'YES' if total_increase < 500 else 'NO'}")
+                    print("================================")
+                    
         except Exception as e:
             logger.error(f"Error in final memory tracking: {e}")
+        
+        # Final garbage collection
+        gc.collect()
+        print("=== ENHANCED CLEANUP COMPLETE ===")
 
 @app.get("/cleanup-status/")
 async def cleanup_status():
@@ -1701,6 +1902,99 @@ async def debug_rotation(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Debug rotation error: {e}")
         raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
+
+@app.get("/memory-status/")
+async def memory_status():
+    """Get current memory status and system information"""
+    try:
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        system_memory = psutil.virtual_memory()
+        
+        return {
+            "process_memory_mb": round(memory_info.rss / (1024**2), 1),
+            "process_memory_percent": round(process.memory_percent(), 2),
+            "system_memory_used_percent": round(system_memory.percent, 1),
+            "system_memory_available_gb": round(system_memory.available / (1024**3), 2),
+            "system_memory_total_gb": round(system_memory.total / (1024**3), 2),
+            "memory_tracker_active": hasattr(memory_tracker, 'memory_history') and len(memory_tracker.memory_history) > 0,
+            "recent_peak_memory_mb": memory_tracker.peak_memory if hasattr(memory_tracker, 'peak_memory') else 0
+        }
+    except Exception as e:
+        return {"error": f"Failed to get memory status: {str(e)}"}
+
+@app.post("/optimize-memory/")
+async def optimize_memory():
+    """Force garbage collection and memory optimization"""
+    try:
+        import gc
+        
+        # Force garbage collection
+        collected = gc.collect()
+        
+        # Get memory before and after
+        process = psutil.Process()
+        memory_after = process.memory_info().rss / (1024**2)
+        
+        # Clean up old tmp files
+        cleanup_old_tmp_files(max_age_hours=1)
+        
+        return {
+            "success": True,
+            "garbage_collected": collected,
+            "memory_after_mb": round(memory_after, 1),
+            "message": "Memory optimization completed"
+        }
+    except Exception as e:
+        return {"error": f"Memory optimization failed: {str(e)}"}
+
+@app.get("/processing-config/")
+async def get_processing_config():
+    """Get current processing configuration and recommendations"""
+    try:
+        import psutil
+        system_memory = psutil.virtual_memory()
+        available_gb = system_memory.available / (1024**3)
+        
+        # Recommend settings based on available memory
+        if available_gb > 8:
+            max_memory_mb = 600
+            batch_size = 20
+            quality_scale = 1.0
+        elif available_gb > 4:
+            max_memory_mb = 400
+            batch_size = 15
+            quality_scale = 0.8
+        else:
+            max_memory_mb = 200
+            batch_size = 10
+            quality_scale = 0.6
+        
+        return {
+            "system_memory": {
+                "total_gb": round(system_memory.total / (1024**3), 1),
+                "available_gb": round(available_gb, 1),
+                "used_percent": round(system_memory.percent, 1)
+            },
+            "recommended_config": {
+                "max_processing_memory_mb": max_memory_mb,
+                "batch_size": batch_size,
+                "quality_scale_factor": quality_scale,
+                "stream_processing": True,
+                "immediate_cleanup": True
+            },
+            "optimizations_enabled": [
+                "Dynamic resolution scaling",
+                "Batch frame processing", 
+                "Immediate resource cleanup",
+                "Stream processing (no temp files)",
+                "Per-frame rotation application",
+                "Aggressive garbage collection"
+            ]
+        }
+    except Exception as e:
+        return {"error": f"Failed to get config: {str(e)}"}
 
 # Startup cleanup - remove old tmp files when server starts
 try:
