@@ -1190,32 +1190,43 @@ class DatabaseManager:
         inserted_feedback_id = None
         
         try:
-            # 1. Insert video record
-            video_data = {
-                "user_id": user_id,
-                "video_url": video_url,
-                "thumbnail_url": thumbnail_url,
-            }
             
+            # 1. Insert analysis results
+            results_data = {
+                "user_id": user_id,
+                "head_position": analysis_summary.get("head_position", {}).get("median_score", 0),
+                "back_position": analysis_summary.get("back_position", {}).get("median_score", 0),
+                "arm_flexion": analysis_summary.get("arm_flexion", {}).get("median_score", 0),
+                "right_knee": analysis_summary.get("right_knee", {}).get("median_score", 0),
+                "left_knee": analysis_summary.get("left_knee", {}).get("median_score", 0),
+                "foot_strike": analysis_summary.get("foot_strike", {}).get("median_score", 0),
+                "overall_score": analysis_summary.get("overall_score", 0),
+            }
+
             try:
-                video_response = self.supabase.table("videos").insert(video_data).execute()
-                if not video_response.data:
-                    raise Exception(f"Failed to create video record: {video_response.error}")
+                results_response = self.supabase.table("analysis_results").insert(results_data).execute()
+                if not results_response.data:
+                    raise Exception(f"Failed to create analysis results: {results_response.error}")
                 
-                video_id = video_response.data[0]["video_id"]
-                inserted_video_id = video_id
-                logger.info(f"Video record created: {video_id}")
+                analysis_id = results_response.data[0]["id"]
+                logger.info(f"Analysis results created: {analysis_id}")
                 
             except Exception as e:
-                logger.error(f"Video table error: {str(e)}")
+                logger.error(f"Analysis results error: {str(e)}")
+                # Rollback both records
+                self._rollback_feedback(inserted_feedback_id)
+                self._rollback_video(inserted_video_id)
+                self._rollback_analysis(analysis_id)
                 return {
                     "success": False,
-                    "error": f"Videos table error: {str(e)}",
-                    "data": video_data
+                    "error": f"Analysis results error: {str(e)}",
+                    "data": results_data
                 }
+
 
             # 2. Insert feedback record
             feedback_data = {
+                "analysis_results_id": analysis_id,
                 "overall_assessment": feedback.get("overall_assessment", ""),
                 "strengths": feedback.get("strengths", []),
                 "priority_areas": feedback.get("priority_areas", []),
@@ -1240,40 +1251,32 @@ class DatabaseManager:
                     "error": f"Feedback table error: {str(e)}",
                     "data": feedback_data
                 }
-
-            # 3. Insert analysis results
-            results_data = {
-                "video_id": video_id,
+            
+            # 3. Insert video record
+            video_data = {
                 "user_id": user_id,
-                "feedback_id": feedback_id,
-                "head_position": analysis_summary.get("head_position", {}).get("median_score", 0),
-                "back_position": analysis_summary.get("back_position", {}).get("median_score", 0),
-                "arm_flexion": analysis_summary.get("arm_flexion", {}).get("median_score", 0),
-                "right_knee": analysis_summary.get("right_knee", {}).get("median_score", 0),
-                "left_knee": analysis_summary.get("left_knee", {}).get("median_score", 0),
-                "foot_strike": analysis_summary.get("foot_strike", {}).get("median_score", 0),
-                "overall_score": analysis_summary.get("overall_score", 0),
+                "video_url": video_url,
+                "thumbnail_url": thumbnail_url,
+                "analysis_results_id": analysis_id,
             }
             
             try:
-                results_response = self.supabase.table("analysis_results").insert(results_data).execute()
-                if not results_response.data:
-                    raise Exception(f"Failed to create analysis results: {results_response.error}")
+                video_response = self.supabase.table("videos").insert(video_data).execute()
+                if not video_response.data:
+                    raise Exception(f"Failed to create video record: {video_response.error}")
                 
-                analysis_id = results_response.data[0]["id"]
-                logger.info(f"Analysis results created: {analysis_id}")
+                video_id = video_response.data[0]["video_id"]
+                inserted_video_id = video_id
+                logger.info(f"Video record created: {video_id}")
                 
             except Exception as e:
-                logger.error(f"Analysis results error: {str(e)}")
-                # Rollback both records
-                self._rollback_feedback(inserted_feedback_id)
-                self._rollback_video(inserted_video_id)
+                logger.error(f"Video table error: {str(e)}")
                 return {
                     "success": False,
-                    "error": f"Analysis results error: {str(e)}",
-                    "data": results_data
+                    "error": f"Videos table error: {str(e)}",
+                    "data": video_data
                 }
-                    
+                        
             logger.info("All database records created successfully")
             return {
                 "success": True,
@@ -1312,6 +1315,13 @@ class DatabaseManager:
                 logger.info(f"Rolled back feedback record: {feedback_id}")
             except Exception as e:
                 logger.error(f"Failed to rollback feedback {feedback_id}: {str(e)}")
+
+    def _rollback_analysis(self, analysis_id):
+        if analysis_id:
+            try:
+                self.supabase.table("analysis_results").delete().eq("id", analysis_id).execute()
+            except Exception as e:
+                logger.error(f"Failed to rollback analysis_results")
 
 # Initialize managers
 storage_manager = StorageManager(supabase, SUPABASE_BUCKET)
