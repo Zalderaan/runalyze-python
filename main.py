@@ -238,8 +238,8 @@ app.add_middleware(
 mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 pose = mp_pose.Pose()
-detector = pm.PoseDetector()
-analyzer = rfa.RFAnalyzer()
+# detector = pm.PoseDetector()
+# analyzer = rfa.RFAnalyzer()
 
 # Load environment variables
 load_dotenv()
@@ -1444,7 +1444,9 @@ async def process_video(
     
     # Initialize processors
     video_processor = VideoProcessor()
-    
+    detector = pm.PoseDetector()         # <-- Move here
+    analyzer = rfa.RFAnalyzer()
+
     # initialize all variables at the start
     contact_results = {"right_landing": False}
     final_video_path = None
