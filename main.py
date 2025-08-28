@@ -1062,12 +1062,12 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
         # Stop frame memory monitoring and get statistics
         memory_stats = stop_frame_memory_monitoring()
         
-        # Export detailed memory analysis
-        if frame_count > 0:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            memory_export_path = f"tmp/memory_analysis_{timestamp}.json"
-            frame_monitor.export_frame_data(memory_export_path)
-            logger.info(f"📊 Detailed memory analysis exported to: {memory_export_path}")
+        # # Export detailed memory analysis
+        # if frame_count > 0:
+        #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        #     memory_export_path = f"tmp/memory_analysis_{timestamp}.json"
+        #     frame_monitor.export_frame_data(memory_export_path)
+        #     logger.info(f"📊 Detailed memory analysis exported to: {memory_export_path}")
     
     processing_time = (datetime.now() - start_time).total_seconds()
     return frame_count, processed_count, processing_time, memory_stats
