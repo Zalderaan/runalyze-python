@@ -4,7 +4,7 @@ class RFAnalyzer:
     def __init__(self):
         self.ideal_angles = {
             "head_position": {"min": 10, "max": 20, "tolerance": 4},
-            "back_position": {"min": 0, "max": 5, "tolerance": 15},
+            "back_position": {"min": 6, "max": 12, "tolerance": 4},
             "arm_flexion": {"min": 70, "max": 90, "tolerance": 15},
             "left_knee": {"min": 80, "max": 120, "tolerance": 20},
             "right_knee": {"min": 120, "max": 170, "tolerance": 20},
@@ -16,24 +16,24 @@ class RFAnalyzer:
 
     def calculate_score(self, angle_name, measured_angle):
         if angle_name not in self.ideal_angles:
-            return 0 # unknown joint
-        
+            return 0  # unknown joint
+
         ideal = self.ideal_angles[angle_name]
         min_ideal, max_ideal = ideal['min'], ideal['max']
         tolerance = ideal['tolerance']
-        mid_ideal = (min_ideal + max_ideal) / 2 # get midpoint
+        mid_ideal = (min_ideal + max_ideal) / 2
 
-        if min_ideal <= measured_angle <= max_ideal:
-            return 100
-        
+        # total "safe zone" = range/2 + tolerance
+        max_deviation = ((max_ideal - min_ideal) / 2) + tolerance
         deviation = abs(measured_angle - mid_ideal)
-        if deviation > tolerance:
+
+        if deviation > max_deviation:
             return 0
 
-        # Linear penalty (e.g., halfway to tolerance → 50%)
-        score = max(0, 100 - (deviation / tolerance) * 100)
-        
-        return score 
+        # linear scaling from 100 (at mid) → 0 (outside tolerance)
+        score = 100 - (deviation / max_deviation) * 100
+        return max(0, score)
+
 
     def analyze_frame(self, angles):
         
@@ -100,12 +100,14 @@ class RFAnalyzer:
                         average_score = float(np.mean(scores_array))
                         min_score = float(np.min(scores_array))
                         max_score = float(np.max(scores_array))
+
                         
                         typical_angle = float(np.median(angles_array))
                         min_angle = float(np.min(angles_array))
                         max_angle = float(np.max(angles_array))
                         
                         # ✓ Calculate consistency score safely
+                        representative_score = float(self.calculate_score(joint, typical_angle))
                         mean_score = np.mean(scores_array)
                         if mean_score > 0:
                             std_score = np.std(scores_array)
@@ -114,7 +116,9 @@ class RFAnalyzer:
                             consistency_score = 0
                         
                         summary[joint] = {
-                            'median_score': median_score,
+                            'median_score': representative_score,  # Use this instead
+                            'raw_median_score': median_score,      # Keep original for debugging
+                            'typical_angle': typical_angle,
                             'average_score': average_score,
                             'min_score': min_score,
                             'max_score': max_score,

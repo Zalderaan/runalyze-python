@@ -36,11 +36,11 @@ class FeedbackGenerator:
         },
         "back_position": {
             "thresholds": [
-                (float('-inf'), -15, "leaning significantly backward", "Focus on a slight forward lean from your ankles, not your waist."),
-                (-15, 0, "leaning backward or too upright", "Allow for a slight forward lean (0-5°) from your ankles."),
-                (0, 5, "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean."),
-                (5, 20, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
-                (20, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
+                (float('-inf'), 2, "leaning significantly backward", "Focus on a slight forward lean from your ankles, not your waist."),
+                (2, 6, "leaning backward or too upright", "Allow for a slight forward lean (0-5°) from your ankles."),
+                (6, 12, "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean."),
+                (13, 16, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
+                (16, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
                 ("default", "positioned", "Continue monitoring your torso position.")
             ]
         },
@@ -76,10 +76,10 @@ class FeedbackGenerator:
         },
         "foot_strike": {
             "thresholds": [
-                (float('-inf'), 0, "landing too far forward on your toes", "Land more on your midfoot rather than your forefoot."),
-                (0, 5, "landing slightly forward of optimal", "Try to land a bit more toward your midfoot."),
-                (5, 10, "landing well on your midfoot", "Excellent foot strike pattern! This is optimal for efficiency."),
-                (10, 15, "landing with a slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
+                (float('-inf'), 0, "excessive forefoot strike", "Land more on your midfoot rather than your forefoot."),
+                (0, 5, "slight forefoot strike", "Try to land a bit more toward your midfoot."),
+                (5, 10, "good midfoot landing", "Excellent foot strike pattern! This is optimal for efficiency."),
+                (10, 15, "slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
                 (15, float('inf'), "landing on your heel", "Try to land more on your midfoot directly under your center of gravity."),
                 ("default", "positioned", "Continue monitoring your foot strike pattern.")
             ]
@@ -118,22 +118,27 @@ class FeedbackGenerator:
             # No matching rule found, use default
             direction = "showing measured angle"
             advice = "Continue monitoring this metric."
-        
+            
         # Format response based on area
         if area == "head_position":
-            return f"Your head is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your head is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "back_position":
-            return f"Your torso is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your torso is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "arm_flexion":
-            return f"Your arm flexion is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your arm flexion is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "right_knee":
-            return f"Your front knee is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your front knee is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "left_knee":
-            return f"Your back knee is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your back knee is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "foot_strike":
-            return f"You are {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"You are {direction} (avg: {angle:.1f}°). {advice}"
         else:
-            return f"Analysis shows {angle:.1f}° average for {area.replace('_', ' ')}."
+            feedback_str = f"Analysis shows {angle:.1f}° average for {area.replace('_', ' ')}."
+
+        return {
+            "feedback": feedback_str,
+            "classification": direction
+        }
 
 async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, drill_manager: DrillManager) -> Dict[str, Any]:
     """
@@ -217,12 +222,14 @@ async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, dril
             formatted_drills = [drill_manager.format_drill_for_frontend(drill) for drill in drills]
             
             # Generate detailed feedback with drills
+            analysis_result = FeedbackGenerator.generate_dynamic_feedback(area, angle, score)
             feedback["detailed_feedback"][area] = {
-                "analysis": FeedbackGenerator.generate_dynamic_feedback(area, angle, score),
+                "analysis": analysis_result["feedback"],
                 "drills": formatted_drills,
                 "score": score,
                 "angle": angle,
-                "performance_level": performance_level
+                "performance_level": performance_level,
+                "classification": analysis_result["classification"]
             }
         
         logger.info(f"Generated feedback for user {user_id} with overall score {overall_score}")

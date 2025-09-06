@@ -4,6 +4,7 @@ RunAnalyze - AI-powered running form analysis API.
 This module provides endpoints for video analysis, drill suggestions,
 and comprehensive running form feedback using MediaPipe pose detection.
 """
+import time
 import psutil
 import tracemalloc
 import gc
@@ -833,6 +834,253 @@ def get_optimal_processing_size(original_width, original_height, max_memory_mb=4
     
     return new_width, new_height, scale_factor
 
+def detect_running_activity(video_path: str, detector, min_samples: int = 10, confidence_threshold: float = 0.65) -> Dict[str, Any]:
+    """
+    Detect if the uploaded video contains running activity by analyzing pose landmarks
+    and movement patterns characteristic of running.
+    
+    Args:
+        video_path: Path to the video file
+        detector: PoseDetector instance
+        min_samples: Minimum number of frames with poses to analyze
+        confidence_threshold: Minimum confidence score to consider it running (0.0-1.0)
+        
+    Returns:
+        Dict containing:
+        - is_running: bool - Whether running activity was detected
+        - confidence: float - Confidence score (0.0-1.0)
+        - reason: str - Explanation of the decision
+        - details: dict - Analysis details
+    """
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {
+                "is_running": False,
+                "confidence": 0.0,
+                "reason": "Cannot open video file",
+                "details": {}
+            }
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        # Sample every N frames for efficiency (analyze ~30 frames max)
+        sample_interval = max(1, total_frames // 30)
+        
+        # Running activity indicators
+        pose_detected_count = 0
+        vertical_movement_samples = []
+        leg_movement_samples = []
+        arm_swing_samples = []
+        pace_indicators = []
+        body_lean_samples = []
+        
+        frame_count = 0
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # Skip frames based on sample interval
+            if frame_count % sample_interval != 0:
+                frame_count += 1
+                continue
+            
+            # Apply rotation if needed (similar to main processing)
+            rotation = VideoProcessor.get_video_rotation(video_path)
+            if rotation != 0:
+                frame = smart_rotate_frame(frame, rotation)
+            
+            # Detect pose
+            frame_with_pose = detector.findPose(frame)
+            landmarks = detector.findPosition(frame_with_pose)
+            
+            if landmarks:
+                pose_detected_count += 1
+                
+                # Extract key landmarks for running analysis
+                try:
+                    # Key landmarks (MediaPipe pose indices)
+                    left_shoulder = landmarks[11]  # Left shoulder
+                    right_shoulder = landmarks[12]  # Right shoulder
+                    left_hip = landmarks[23]  # Left hip
+                    right_hip = landmarks[24]  # Right hip
+                    left_knee = landmarks[25]  # Left knee
+                    right_knee = landmarks[26]  # Right knee
+                    left_ankle = landmarks[27]  # Left ankle
+                    right_ankle = landmarks[28]  # Right ankle
+                    left_wrist = landmarks[15]  # Left wrist
+                    right_wrist = landmarks[16]  # Right wrist
+                    
+                    # 1. Vertical movement (bouncing pattern typical in running)
+                    hip_center_y = (left_hip[2] + right_hip[2]) / 2
+                    vertical_movement_samples.append(hip_center_y)
+                    
+                    # 2. Leg alternation (knees moving in opposite patterns)
+                    left_knee_y = left_knee[2]
+                    right_knee_y = right_knee[2]
+                    leg_movement_samples.append({
+                        'left_knee_y': left_knee_y,
+                        'right_knee_y': right_knee_y,
+                        'knee_separation': abs(left_knee_y - right_knee_y)
+                    })
+                    
+                    # 3. Arm swing (arms moving rhythmically)
+                    arm_swing_samples.append({
+                        'left_wrist_y': left_wrist[2],
+                        'right_wrist_y': right_wrist[2],
+                        'arm_separation': abs(left_wrist[2] - right_wrist[2])
+                    })
+                    
+                    # 4. Forward lean (typical running posture)
+                    shoulder_center_y = (left_shoulder[2] + right_shoulder[2]) / 2
+                    hip_center_y = (left_hip[2] + right_hip[2]) / 2
+                    body_lean = abs(shoulder_center_y - hip_center_y)
+                    body_lean_samples.append(body_lean)
+                    
+                    # 5. Pace indicators (ankle height variations)
+                    ankle_avg_y = (left_ankle[2] + right_ankle[2]) / 2
+                    pace_indicators.append(ankle_avg_y)
+                    
+                except (IndexError, KeyError):
+                    # Skip frame if landmarks are incomplete
+                    continue
+            
+            frame_count += 1
+            
+            # Stop if we have enough samples
+            if pose_detected_count >= min_samples:
+                break
+        
+        cap.release()
+        
+        # Analyze collected data
+        if pose_detected_count < 5:
+            return {
+                "is_running": False,
+                "confidence": 0.0,
+                "reason": f"Insufficient pose detection (only {pose_detected_count} frames with poses detected)",
+                "details": {
+                    "total_frames_analyzed": frame_count,
+                    "poses_detected": pose_detected_count
+                }
+            }
+        
+        # Calculate running indicators
+        running_score = 0.0
+        max_score = 0.0
+        analysis_details = {}
+        
+        # 1. Vertical movement analysis (0-20 points)
+        if len(vertical_movement_samples) >= 3:
+            vertical_variance = np.var(vertical_movement_samples)
+            vertical_score = min(20, vertical_variance * 1000)  # Scale factor
+            running_score += vertical_score
+            analysis_details["vertical_movement"] = {
+                "variance": float(vertical_variance),
+                "score": float(vertical_score),
+                "interpretation": "High variance indicates bouncing motion typical of running"
+            }
+        max_score += 20
+        
+        # 2. Leg alternation analysis (0-25 points)
+        if len(leg_movement_samples) >= 3:
+            knee_separations = [sample['knee_separation'] for sample in leg_movement_samples]
+            leg_variance = np.var(knee_separations)
+            avg_separation = np.mean(knee_separations)
+            
+            # Good leg alternation has high variance and reasonable separation
+            leg_score = min(25, (leg_variance * 100) + (avg_separation * 0.5))
+            running_score += leg_score
+            analysis_details["leg_alternation"] = {
+                "avg_knee_separation": float(avg_separation),
+                "separation_variance": float(leg_variance),
+                "score": float(leg_score),
+                "interpretation": "Alternating leg motion with varying knee positions"
+            }
+        max_score += 25
+        
+        # 3. Arm swing analysis (0-20 points)
+        if len(arm_swing_samples) >= 3:
+            arm_separations = [sample['arm_separation'] for sample in arm_swing_samples]
+            arm_variance = np.var(arm_separations)
+            arm_score = min(20, arm_variance * 50)
+            running_score += arm_score
+            analysis_details["arm_swing"] = {
+                "variance": float(arm_variance),
+                "score": float(arm_score),
+                "interpretation": "Rhythmic arm movement typical of running"
+            }
+        max_score += 20
+        
+        # 4. Pace variation analysis (0-20 points)
+        if len(pace_indicators) >= 3:
+            pace_variance = np.var(pace_indicators)
+            pace_score = min(20, pace_variance * 100)
+            running_score += pace_score
+            analysis_details["pace_variation"] = {
+                "ankle_height_variance": float(pace_variance),
+                "score": float(pace_score),
+                "interpretation": "Foot strike pattern variation"
+            }
+        max_score += 20
+        
+        # 5. Overall movement consistency (0-15 points)
+        if pose_detected_count >= 5:
+            detection_ratio = pose_detected_count / min(frame_count, 30)  # Up to 30 sampled frames
+            consistency_score = detection_ratio * 15
+            running_score += consistency_score
+            analysis_details["pose_consistency"] = {
+                "detection_ratio": float(detection_ratio),
+                "score": float(consistency_score),
+                "interpretation": "Consistent human pose detection throughout video"
+            }
+        max_score += 15
+        
+        # Calculate confidence (normalize to 0-1)
+        confidence = min(1.0, running_score / max_score) if max_score > 0 else 0.0
+        is_running = confidence >= confidence_threshold
+        
+        # Determine reason
+        if not is_running:
+            if confidence < 0.3:
+                reason = f"Low running activity confidence ({confidence:.1%}). Video may contain non-running activities like walking, standing, or other movements."
+            elif confidence < confidence_threshold:
+                reason = f"Moderate activity detected ({confidence:.1%}) but below running confidence threshold ({confidence_threshold:.1%}). May be walking or light jogging."
+            else:
+                reason = "Activity detected but classified as non-running based on movement patterns."
+        else:
+            reason = f"Running activity detected with {confidence:.1%} confidence. Movement patterns consistent with running gait."
+        
+        return {
+            "is_running": is_running,
+            "confidence": float(confidence),
+            "reason": reason,
+            "details": {
+                "total_frames_analyzed": frame_count,
+                "poses_detected": pose_detected_count,
+                "running_score": float(running_score),
+                "max_possible_score": float(max_score),
+                "analysis_breakdown": analysis_details,
+                "video_properties": {
+                    "total_frames": total_frames,
+                    "fps": float(fps),
+                    "duration_seconds": float(total_frames / fps) if fps > 0 else 0
+                }
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in running detection: {e}")
+        return {
+            "is_running": False,
+            "confidence": 0.0,
+            "reason": f"Error during analysis: {str(e)}",
+            "details": {"error": str(e)}
+        }
+    
 def process_frame_with_scaling(frame, detector, processing_width, processing_height, 
                               original_width, original_height, scale_factor, rotation=0):
     """
@@ -1552,6 +1800,43 @@ async def process_video(
         
         log_memory_usage("AFTER_VIDEO_ANALYSIS_SETUP", video_info)
 
+        # === STAGE 6.5: RUNNING ACTIVITY DETECTION ===
+        print("=== STAGE 6.5: DETECTING RUNNING ACTIVITY ===")
+        log_memory_usage("BEFORE_RUNNING_DETECTION")
+
+        # Detect if video contains running activity
+        running_detection = detect_running_activity(video_path, detector, min_samples=10, confidence_threshold=0.65)
+
+        if not running_detection["is_running"]:
+            # Clean up resources before returning error
+            if cap:
+                cap.release()
+            cv2.destroyAllWindows()
+            
+            # Clean up uploaded file
+            cleanup_temp_enhanced(video_path, thumbnail_path)
+            
+            # Return error response
+            raise HTTPException(
+                status_code=running_detection.get("status_code", 400),
+                detail={
+                    "error": "Invalid video content",
+                    "message": running_detection["reason"],
+                    "confidence": running_detection["confidence"],
+                    "details": running_detection["details"],
+                    "suggestions": [
+                        "Please upload a video showing running activity",
+                        "Ensure the person is clearly visible and in motion",
+                        "Video should show running gait with alternating leg movement",
+                        "Avoid videos of walking, standing, or other non-running activities"
+                    ]
+                }
+            )
+
+        logger.info(f"Running detection passed: {running_detection['confidence']:.1%} confidence")
+        print(f"Running activity confirmed: {running_detection['confidence']:.1%} confidence")
+        log_memory_usage("AFTER_RUNNING_DETECTION", f"Confidence: {running_detection['confidence']:.1%}")
+
         # === STAGE 7: OUTPUT VIDEO WRITER SETUP ===
         print("=== STAGE 7: SETTING UP OUTPUT VIDEO WRITER ===")
         log_memory_usage("BEFORE_OUTPUT_WRITER_SETUP")
@@ -1620,7 +1905,6 @@ async def process_video(
         cv2.destroyAllWindows()
 
         # Add small delay to ensure file handles are released
-        import time
         time.sleep(0.1)
         
         # Check output file size
@@ -1693,7 +1977,11 @@ async def process_video(
                 "video_duration_seconds": round(duration_seconds, 2),
                 "video_resolution": f"{width}x{height}"
             },
-            "memory_stats": final_memory_summary
+            "memory_stats": final_memory_summary,
+            "running_detection": {
+                "confidence": running_detection["confidence"],
+                "details": running_detection["details"]
+            }
         }
         response_data["database_records"] = analysis_result
 
