@@ -4,7 +4,7 @@ class RFAnalyzer:
     def __init__(self):
         self.ideal_angles = {
             "head_position": {"min": 10, "max": 20, "tolerance": 4},
-            "back_position": {"min": 0, "max": 5, "tolerance": 15},
+            "back_position": {"min": 6, "max": 12, "tolerance": 4},
             "arm_flexion": {"min": 70, "max": 90, "tolerance": 15},
             "left_knee": {"min": 80, "max": 120, "tolerance": 20},
             "right_knee": {"min": 120, "max": 170, "tolerance": 20},
