@@ -39,7 +39,7 @@ class FeedbackGenerator:
                 (float('-inf'), 2, "leaning significantly backward", "Focus on a slight forward lean from your ankles, not your waist."),
                 (2, 6, "leaning backward or too upright", "Allow for a slight forward lean (0-5°) from your ankles."),
                 (6, 12, "well-positioned with good forward lean", "Excellent torso position! Maintain this slight forward lean."),
-                (13, 16, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
+                (12, 16, "leaning forward more than optimal", "Reduce your forward lean slightly and engage your core."),
                 (16, float('inf'), "leaning too far forward", "Try to run more upright with just a slight forward lean from your ankles."),
                 ("default", "positioned", "Continue monitoring your torso position.")
             ]

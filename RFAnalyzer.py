@@ -16,23 +16,23 @@ class RFAnalyzer:
 
     def calculate_score(self, angle_name, measured_angle):
         if angle_name not in self.ideal_angles:
-            return 0  # unknown joint
-
+            return 0
+        
         ideal = self.ideal_angles[angle_name]
         min_ideal, max_ideal = ideal['min'], ideal['max']
         tolerance = ideal['tolerance']
         mid_ideal = (min_ideal + max_ideal) / 2
 
-        # total "safe zone" = range/2 + tolerance
-        max_deviation = ((max_ideal - min_ideal) / 2) + tolerance
+        if min_ideal <= measured_angle <= max_ideal:
+            return 100
+        
         deviation = abs(measured_angle - mid_ideal)
-
-        if deviation > max_deviation:
+        if deviation > tolerance:
             return 0
 
-        # linear scaling from 100 (at mid) → 0 (outside tolerance)
-        score = 100 - (deviation / max_deviation) * 100
-        return max(0, score)
+        # Linear penalty (e.g., halfway to tolerance → 50%)
+        score = max(0, 100 - (deviation / tolerance) * 100)
+        return score
 
 
     def analyze_frame(self, angles):

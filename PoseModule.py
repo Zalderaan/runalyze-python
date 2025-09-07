@@ -4,7 +4,7 @@ import math
 
 class PoseDetector():
     def __init__(self, mode=False, upBody=False, smooth=True,
-                 detectionCon=0.5, trackCon=0.5):
+                 detectionCon=0.8, trackCon=0.8):
         self.mode = mode
         self.upBody = upBody
         self.smooth = smooth
@@ -15,7 +15,7 @@ class PoseDetector():
         self.mp_draw = mp.solutions.drawing_utils
         self.pose = self.mp_pose.Pose(
                 static_image_mode = self.mode, 
-                model_complexity = 0, 
+                model_complexity = 2, 
                 smooth_landmarks = self.smooth, 
                 min_detection_confidence =  self.detectionCon, 
                 min_tracking_confidence =  self.trackCon
