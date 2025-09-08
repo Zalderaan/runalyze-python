@@ -44,8 +44,6 @@ from enum import Enum
 import PoseModule as pm
 import RFAnalyzer as rfa
 
-import PoseModule as pm
-import RFAnalyzer as rfa
 
 # Configure logging
 logging.basicConfig(
