@@ -2012,14 +2012,14 @@ async def process_video(
     finally:
 
         # === MEMORY DEBUGGING BEFORE CLEANUP ===
-        print("=== OBJGRAPH: Most common objects before cleanup ===")
-        objgraph.show_most_common_types(limit=10)
-        print("=== OBJGRAPH: Growth since startup ===")
-        objgraph.show_growth(limit=5)
-        print("=== PYMPLER: Memory summary before cleanup ===")
-        all_objects = muppy.get_objects()
-        sum_stats = summary.summarize(all_objects)
-        summary.print_(sum_stats)
+        # print("=== OBJGRAPH: Most common objects before cleanup ===")
+        # objgraph.show_most_common_types(limit=10)
+        # print("=== OBJGRAPH: Growth since startup ===")
+        # objgraph.show_growth(limit=5)
+        # print("=== PYMPLER: Memory summary before cleanup ===")
+        # all_objects = muppy.get_objects()
+        # sum_stats = summary.summarize(all_objects)
+        # summary.print_(sum_stats)
 
         # === ENHANCED RESOURCE CLEANUP ===
         print("=== STARTING ENHANCED CLEANUP ===")
@@ -2044,6 +2044,7 @@ async def process_video(
             logger.error(f"Error releasing video resources: {e}")
         
         # Set heavy objects to None to help garbage collection
+        detector.pose.close()
         detector = None
         analyzer = None
         video_processor = None
@@ -2136,14 +2137,14 @@ async def process_video(
             logger.error(f"Error in final memory tracking: {e}")
         
         # === MEMORY DEBUGGING AFTER CLEANUP ===
-        print("=== OBJGRAPH: Most common objects after cleanup ===")
-        objgraph.show_most_common_types(limit=10)
-        print("=== OBJGRAPH: Growth since startup ===")
-        objgraph.show_growth(limit=5)
-        print("=== PYMPLER: Memory summary after cleanup ===")
-        all_objects = muppy.get_objects()
-        sum_stats = summary.summarize(all_objects)
-        summary.print_(sum_stats)
+        # print("=== OBJGRAPH: Most common objects after cleanup ===")
+        # objgraph.show_most_common_types(limit=10)
+        # print("=== OBJGRAPH: Growth since startup ===")
+        # objgraph.show_growth(limit=5)
+        # print("=== PYMPLER: Memory summary after cleanup ===")
+        # all_objects = muppy.get_objects()
+        # sum_stats = summary.summarize(all_objects)
+        # summary.print_(sum_stats)
 
         # Final garbage collection
         # del scores_history, angles_history
@@ -2518,6 +2519,30 @@ async def optimize_memory():
         }
     except Exception as e:
         return {"error": f"Memory optimization failed: {str(e)}"}
+    
+# ✅ Debug endpoint: only call this manually when you want to inspect memory
+@app.get("/debug/memory")
+def debug_memory():
+    # Force garbage collection first
+    gc.collect()
+
+    process = psutil.Process()
+    mem_info = process.memory_info()
+
+    # --- Objgraph: show growth since start ---
+    growth = objgraph.growth(limit=10)  # top 10 growing types
+
+    # --- Pympler: summarize objects in memory ---
+    all_objects = muppy.get_objects()
+    sum_list = summary.summarize(all_objects)
+    top_summary = summary.format_(sum_list[:10])  # top 10 types by size
+
+    return {
+        "rss_mb": round(mem_info.rss / 1024 / 1024, 2),  # resident memory
+        "vms_mb": round(mem_info.vms / 1024 / 1024, 2),  # virtual memory
+        "objgraph_growth": growth,
+        "pympler_summary": top_summary,
+    }
 
 @app.get("/processing-config/")
 async def get_processing_config():
