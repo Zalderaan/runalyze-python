@@ -237,9 +237,9 @@ app.add_middleware(
 )
 
 # Initialize MediaPipe and analysis components
-mp_pose = mp.solutions.pose
-mp_draw = mp.solutions.drawing_utils
-pose = mp_pose.Pose()
+# mp_pose = mp.solutions.pose
+# mp_draw = mp.solutions.drawing_utils
+# pose = mp_pose.Pose()
 # detector = pm.PoseDetector()
 # analyzer = rfa.RFAnalyzer()
 
@@ -1283,6 +1283,7 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
             # Clear batch from memory
             del batch_frames
             gc.collect()  # Force garbage collection after each batch
+            log_memory_usage("AFTER_BATCH_CLEANUP")
             
             # Log memory after batch cleanup
             if frame_count > 0:
@@ -1890,6 +1891,11 @@ async def process_video(
         
         summary = analyzer.get_summary()  # Get aggregated results
         print("Analysis summary:", summary)
+        analyzer.reset() if hasattr(analyzer, "reset") else None
+        detector.reset() if hasattr(detector, "reset") else None
+        gc.collect()
+        log_memory_usage("AFTER_ANALYZER_RESET")
+
         
         
         log_memory_usage("AFTER_ANALYSIS_SUMMARY")
@@ -2014,6 +2020,8 @@ async def process_video(
                 out.release()
                 out = None
             cv2.destroyAllWindows()
+
+            log_memory_usage("AFTER CAP RELEASE")
             
             # Force immediate cleanup of large objects
             immediate_resource_cleanup(cap, out)
@@ -2021,6 +2029,12 @@ async def process_video(
         except Exception as e:
             logger.error(f"Error releasing video resources: {e}")
         
+        # Set heavy objects to None to help garbage collection
+        detector = None
+        analyzer = None
+        video_processor = None
+        del cap, out
+
         # Memory cleanup before file operations
         gc.collect()
         
@@ -2051,18 +2065,17 @@ async def process_video(
             pass
         
         # Enhanced cleanup with retry logic
-        # TODO: Temporarily disabled cleanup for debugging - re-enable for production
         cleanup_temp_enhanced(*cleanup_files)
         
         # Log files that would be cleaned up for debugging
-        logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
-        logger.info("Files that would be cleaned up:")
-        for file_path in cleanup_files:
-            if os.path.exists(file_path):
-                logger.info(f"  EXISTS: {file_path}")
-            else:
-                logger.info(f"  MISSING: {file_path}")
-        logger.info("=== END CLEANUP DEBUG INFO ===")
+        # logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
+        # logger.info("Files that would be cleaned up:")
+        # for file_path in cleanup_files:
+        #     if os.path.exists(file_path):
+        #         logger.info(f"  EXISTS: {file_path}")
+        #     else:
+        #         logger.info(f"  MISSING: {file_path}")
+        # logger.info("=== END CLEANUP DEBUG INFO ===")
         
         # Keep files for inspection, but still do memory cleanup
         
@@ -2109,7 +2122,10 @@ async def process_video(
             logger.error(f"Error in final memory tracking: {e}")
         
         # Final garbage collection
+        del scores_history, angles_history
         gc.collect()
+        log_memory_usage("AFTER_FINAL_GC")
+        
         print("=== ENHANCED CLEANUP COMPLETE ===")
 
 @app.get("/cleanup-status/")
