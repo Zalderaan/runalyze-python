@@ -25,6 +25,9 @@ from supabase import create_client, Client
 from drill_suggestions import DrillManager
 from feedback_generator import generate_feedback, ScoreThresholds
 
+import objgraph
+from pympler import muppy, summary
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -1889,8 +1892,8 @@ async def process_video(
         print("=== STAGE 9: GENERATING ANALYSIS SUMMARY ===")
         log_memory_usage("BEFORE_ANALYSIS_SUMMARY")
         
-        summary = analyzer.get_summary()  # Get aggregated results
-        print("Analysis summary:", summary)
+        analysis_summary = analyzer.get_summary()  # Get aggregated results
+        print("Analysis summary:", analysis_summary)
         analyzer.reset() if hasattr(analyzer, "reset") else None
         detector.reset() if hasattr(detector, "reset") else None
         gc.collect()
@@ -1951,7 +1954,7 @@ async def process_video(
         print("=== STAGE 13: GENERATING AI FEEDBACK ===")
         log_memory_usage("BEFORE_FEEDBACK_GENERATION")
         
-        feedback = await generate_feedback(summary, user_id, drill_manager)
+        feedback = await generate_feedback(analysis_summary, user_id, drill_manager)
         
         log_memory_usage("AFTER_FEEDBACK_GENERATION")
 
@@ -1959,7 +1962,7 @@ async def process_video(
         print("=== STAGE 14: SAVING TO DATABASE ===")
         log_memory_usage("BEFORE_DATABASE_OPERATIONS")
         
-        analysis_result = database_manager.create_analysis(user_id, download_url, thumbnail_url, summary, feedback)
+        analysis_result = database_manager.create_analysis(user_id, download_url, thumbnail_url, analysis_summary, feedback)
         
         log_memory_usage("AFTER_DATABASE_OPERATIONS")
 
@@ -1973,7 +1976,7 @@ async def process_video(
             "message": "Video processing successful",
             "download_url": download_url,
             "thumbnail_url": thumbnail_url,
-            "analysis_summary": summary,
+            "analysis_summary": analysis_summary,
             "processing_stats": {
                 "total_frames": frame_count,
                 "processed_frames": processed_frames,
@@ -2007,6 +2010,17 @@ async def process_video(
         print(f"Full error details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
+
+        # === MEMORY DEBUGGING BEFORE CLEANUP ===
+        print("=== OBJGRAPH: Most common objects before cleanup ===")
+        objgraph.show_most_common_types(limit=10)
+        print("=== OBJGRAPH: Growth since startup ===")
+        objgraph.show_growth(limit=5)
+        print("=== PYMPLER: Memory summary before cleanup ===")
+        all_objects = muppy.get_objects()
+        sum_stats = summary.summarize(all_objects)
+        summary.print_(sum_stats)
+
         # === ENHANCED RESOURCE CLEANUP ===
         print("=== STARTING ENHANCED CLEANUP ===")
         log_memory_usage("CLEANUP_START")
@@ -2033,7 +2047,7 @@ async def process_video(
         detector = None
         analyzer = None
         video_processor = None
-        del cap, out
+        # del cap, out
 
         # Memory cleanup before file operations
         gc.collect()
@@ -2121,8 +2135,18 @@ async def process_video(
         except Exception as e:
             logger.error(f"Error in final memory tracking: {e}")
         
+        # === MEMORY DEBUGGING AFTER CLEANUP ===
+        print("=== OBJGRAPH: Most common objects after cleanup ===")
+        objgraph.show_most_common_types(limit=10)
+        print("=== OBJGRAPH: Growth since startup ===")
+        objgraph.show_growth(limit=5)
+        print("=== PYMPLER: Memory summary after cleanup ===")
+        all_objects = muppy.get_objects()
+        sum_stats = summary.summarize(all_objects)
+        summary.print_(sum_stats)
+
         # Final garbage collection
-        del scores_history, angles_history
+        # del scores_history, angles_history
         gc.collect()
         log_memory_usage("AFTER_FINAL_GC")
         

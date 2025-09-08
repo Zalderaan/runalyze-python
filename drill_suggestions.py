@@ -228,37 +228,41 @@ class DrillManager:
                 return []
             
             # Process drills concurrently for better performance
-            customization_tasks = []
-            progress_tasks = []
+            # customization_tasks = []
+            # progress_tasks = []
             
-            for drill in drills:
-                if angle is not None:
-                    customization_tasks.append(
-                        self.get_drill_customizations(drill["id"], area, angle)
-                    )
-                else:
-                    customization_tasks.append(asyncio.create_task(
-                        self._get_empty_customization()
-                    ))
+            # for drill in drills:
+            #     if angle is not None:
+            #         customization_tasks.append(
+            #             self.get_drill_customizations(drill["id"], area, angle)
+            #         )
+            #     else:
+            #         customization_tasks.append(asyncio.create_task(
+            #             self._get_empty_customization()
+            #         ))
                 
-                if user_id:
-                    progress_tasks.append(
-                        self.get_user_drill_progress(user_id, drill["id"])
-                    )
-                else:
-                    progress_tasks.append(asyncio.create_task(
-                        self._get_empty_progress()
-                    ))
+            #     if user_id:
+            #         progress_tasks.append(
+            #             self.get_user_drill_progress(user_id, drill["id"])
+            #         )
+            #     else:
+            #         progress_tasks.append(asyncio.create_task(
+            #             self._get_empty_progress()
+            #         ))
             
-            # Wait for all customizations and progress data
-            customizations = await asyncio.gather(*customization_tasks)
-            progress_data = await asyncio.gather(*progress_tasks)
+            # # Wait for all customizations and progress data
+            # customizations = await asyncio.gather(*customization_tasks)
+            # try:
+            #     progress_data = await asyncio.gather(*progress_tasks, return_exceptions=True)
+            # except asyncio.CancelledError:
+            #     logger.error("Async task was cancelled")
+            #     raise
             
             # Build customized drills
             customized_drills = []
             for i, drill in enumerate(drills):
                 customized_drill = self._build_customized_drill(
-                    drill, customizations[i], progress_data[i], 
+                    drill, DrillCustomization(), UserProgress(), 
                     performance_level, area, angle
                 )
                 customized_drills.append(customized_drill)
@@ -287,23 +291,23 @@ class DrillManager:
         """Build a customized drill with all enhancements."""
         customized_drill = drill.copy()
         
-        # Add customizations
-        if customization.angle_specific:
-            customized_drill.update({
-                "focus_note": customization.focus_note,
-                "intensity": customization.intensity,
-                "progression": customization.progression,
-                "angle_specific": True
-            })
+        # # Add customizations
+        # if customization.angle_specific:
+        #     customized_drill.update({
+        #         "focus_note": customization.focus_note,
+        #         "intensity": customization.intensity,
+        #         "progression": customization.progression,
+        #         "angle_specific": True
+        #     })
         
-        # Add user progress
-        if progress.completed_sessions > 0:
-            customized_drill["user_progress"] = {
-                "completed_sessions": progress.completed_sessions,
-                "last_completed": progress.last_completed,
-                "difficulty_rating": progress.difficulty_rating,
-                "notes": progress.notes
-            }
+        # # Add user progress
+        # if progress.completed_sessions > 0:
+        #     customized_drill["user_progress"] = {
+        #         "completed_sessions": progress.completed_sessions,
+        #         "last_completed": progress.last_completed,
+        #         "difficulty_rating": progress.difficulty_rating,
+        #         "notes": progress.notes
+        #     }
         
         # Add performance recommendations
         customized_drill = self._add_performance_recommendations(
