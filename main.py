@@ -235,9 +235,9 @@ app.add_middleware(
 )
 
 # Initialize MediaPipe and analysis components
-mp_pose = mp.solutions.pose
-mp_draw = mp.solutions.drawing_utils
-pose = mp_pose.Pose()
+# mp_pose = mp.solutions.pose
+# mp_draw = mp.solutions.drawing_utils
+# pose = mp_pose.Pose()
 # detector = pm.PoseDetector()
 # analyzer = rfa.RFAnalyzer()
 
