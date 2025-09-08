@@ -25,6 +25,10 @@ from supabase import create_client, Client
 from drill_suggestions import DrillManager
 from feedback_generator import generate_feedback, ScoreThresholds
 
+# ! memory loggin, only import in DEV
+# import objgraph
+# from pympler import muppy, summary
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -1281,6 +1285,7 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
             # Clear batch from memory
             del batch_frames
             gc.collect()  # Force garbage collection after each batch
+            log_memory_usage("AFTER_BATCH_CLEANUP")
             
             # Log memory after batch cleanup
             if frame_count > 0:
@@ -1886,8 +1891,13 @@ async def process_video(
         print("=== STAGE 9: GENERATING ANALYSIS SUMMARY ===")
         log_memory_usage("BEFORE_ANALYSIS_SUMMARY")
         
-        summary = analyzer.get_summary()  # Get aggregated results
-        print("Analysis summary:", summary)
+        analysis_summary = analyzer.get_summary()  # Get aggregated results
+        print("Analysis summary:", analysis_summary)
+        analyzer.reset() if hasattr(analyzer, "reset") else None
+        detector.reset() if hasattr(detector, "reset") else None
+        gc.collect()
+        log_memory_usage("AFTER_ANALYZER_RESET")
+
         
         
         log_memory_usage("AFTER_ANALYSIS_SUMMARY")
@@ -1943,7 +1953,7 @@ async def process_video(
         print("=== STAGE 13: GENERATING AI FEEDBACK ===")
         log_memory_usage("BEFORE_FEEDBACK_GENERATION")
         
-        feedback = await generate_feedback(summary, user_id, drill_manager)
+        feedback = await generate_feedback(analysis_summary, user_id, drill_manager)
         
         log_memory_usage("AFTER_FEEDBACK_GENERATION")
 
@@ -1951,7 +1961,7 @@ async def process_video(
         print("=== STAGE 14: SAVING TO DATABASE ===")
         log_memory_usage("BEFORE_DATABASE_OPERATIONS")
         
-        analysis_result = database_manager.create_analysis(user_id, download_url, thumbnail_url, summary, feedback)
+        analysis_result = database_manager.create_analysis(user_id, download_url, thumbnail_url, analysis_summary, feedback)
         
         log_memory_usage("AFTER_DATABASE_OPERATIONS")
 
@@ -1965,7 +1975,7 @@ async def process_video(
             "message": "Video processing successful",
             "download_url": download_url,
             "thumbnail_url": thumbnail_url,
-            "analysis_summary": summary,
+            "analysis_summary": analysis_summary,
             "processing_stats": {
                 "total_frames": frame_count,
                 "processed_frames": processed_frames,
@@ -1999,6 +2009,17 @@ async def process_video(
         print(f"Full error details: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     finally:
+
+        # === MEMORY DEBUGGING BEFORE CLEANUP ===
+        # print("=== OBJGRAPH: Most common objects before cleanup ===")
+        # objgraph.show_most_common_types(limit=10)
+        # print("=== OBJGRAPH: Growth since startup ===")
+        # objgraph.show_growth(limit=5)
+        # print("=== PYMPLER: Memory summary before cleanup ===")
+        # all_objects = muppy.get_objects()
+        # sum_stats = summary.summarize(all_objects)
+        # summary.print_(sum_stats)
+
         # === ENHANCED RESOURCE CLEANUP ===
         print("=== STARTING ENHANCED CLEANUP ===")
         log_memory_usage("CLEANUP_START")
@@ -2012,6 +2033,8 @@ async def process_video(
                 out.release()
                 out = None
             cv2.destroyAllWindows()
+
+            log_memory_usage("AFTER CAP RELEASE")
             
             # Force immediate cleanup of large objects
             immediate_resource_cleanup(cap, out)
@@ -2019,6 +2042,13 @@ async def process_video(
         except Exception as e:
             logger.error(f"Error releasing video resources: {e}")
         
+        # Set heavy objects to None to help garbage collection
+        detector.pose.close() # <-- fix here, close the pose object
+        detector = None
+        analyzer = None
+        video_processor = None
+        # del cap, out
+
         # Memory cleanup before file operations
         gc.collect()
         
@@ -2049,18 +2079,17 @@ async def process_video(
             pass
         
         # Enhanced cleanup with retry logic
-        # TODO: Temporarily disabled cleanup for debugging - re-enable for production
         cleanup_temp_enhanced(*cleanup_files)
         
         # Log files that would be cleaned up for debugging
-        logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
-        logger.info("Files that would be cleaned up:")
-        for file_path in cleanup_files:
-            if os.path.exists(file_path):
-                logger.info(f"  EXISTS: {file_path}")
-            else:
-                logger.info(f"  MISSING: {file_path}")
-        logger.info("=== END CLEANUP DEBUG INFO ===")
+        # logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
+        # logger.info("Files that would be cleaned up:")
+        # for file_path in cleanup_files:
+        #     if os.path.exists(file_path):
+        #         logger.info(f"  EXISTS: {file_path}")
+        #     else:
+        #         logger.info(f"  MISSING: {file_path}")
+        # logger.info("=== END CLEANUP DEBUG INFO ===")
         
         # Keep files for inspection, but still do memory cleanup
         
@@ -2106,8 +2135,21 @@ async def process_video(
         except Exception as e:
             logger.error(f"Error in final memory tracking: {e}")
         
+        # === MEMORY DEBUGGING AFTER CLEANUP ===
+        # print("=== OBJGRAPH: Most common objects after cleanup ===")
+        # objgraph.show_most_common_types(limit=10)
+        # print("=== OBJGRAPH: Growth since startup ===")
+        # objgraph.show_growth(limit=5)
+        # print("=== PYMPLER: Memory summary after cleanup ===")
+        # all_objects = muppy.get_objects()
+        # sum_stats = summary.summarize(all_objects)
+        # summary.print_(sum_stats)
+
         # Final garbage collection
+        # del scores_history, angles_history
         gc.collect()
+        log_memory_usage("AFTER_FINAL_GC")
+        
         print("=== ENHANCED CLEANUP COMPLETE ===")
 
 @app.get("/cleanup-status/")
@@ -2476,6 +2518,31 @@ async def optimize_memory():
         }
     except Exception as e:
         return {"error": f"Memory optimization failed: {str(e)}"}
+
+# ! only in dev
+# # ✅ Debug endpoint: only call this manually when you want to inspect memory
+# @app.get("/debug/memory")
+# def debug_memory():
+#     # Force garbage collection first
+#     gc.collect()
+
+#     process = psutil.Process()
+#     mem_info = process.memory_info()
+
+#     # --- Objgraph: show growth since start ---
+#     growth = objgraph.growth(limit=10)  # top 10 growing types
+
+#     # --- Pympler: summarize objects in memory ---
+#     all_objects = muppy.get_objects()
+#     sum_list = summary.summarize(all_objects)
+#     top_summary = summary.format_(sum_list[:10])  # top 10 types by size
+
+#     return {
+#         "rss_mb": round(mem_info.rss / 1024 / 1024, 2),  # resident memory
+#         "vms_mb": round(mem_info.vms / 1024 / 1024, 2),  # virtual memory
+#         "objgraph_growth": growth,
+#         "pympler_summary": top_summary,
+#     }
 
 @app.get("/processing-config/")
 async def get_processing_config():
