@@ -14,6 +14,13 @@ class RFAnalyzer:
         self.scores_history = {key: [] for key in self.ideal_angles} # Stores scores per joint across frames
         self.angle_values_history = {key: [] for key in self.ideal_angles} # store actual angles values for user representation
 
+    def reset(self):
+        """Clear history arrays to free memory and avoid stale data."""
+        for key in self.scores_history:
+            self.scores_history[key].clear()
+        for key in self.angle_values_history:
+            self.angle_values_history[key].clear()
+
     def calculate_score(self, angle_name, measured_angle):
         if angle_name not in self.ideal_angles:
             return 0

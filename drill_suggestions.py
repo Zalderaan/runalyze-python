@@ -447,7 +447,7 @@ class DrillManager:
         """
         return {
             "id": drill.get("id"),
-            "name": drill.get("name", "Unknown Drill"),
+            "drill_name": drill.get("drill_name", "Unknown Drill"),
             "description": drill.get("description", ""),
             "duration": drill.get("duration", "Not specified"),
             "frequency": drill.get("frequency", "As needed"),
