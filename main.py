@@ -27,7 +27,7 @@ from feedback_generator import generate_feedback, ScoreThresholds
 
 # ! memory loggin, only import in DEV
 # import objgraph
-from pympler import muppy, summary
+# from pympler import muppy, summary
 
 import cv2
 import mediapipe as mp
