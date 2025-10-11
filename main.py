@@ -216,7 +216,7 @@ app = FastAPI(
 
 # CORS configuration
 CORS_ORIGINS = [
-    "https://runalyze-8x1vbed8s-zalderaans-projects.vercel.app",  # Your Vercel app
+    "https://runalyze.online",  # Your Vercel app
 ]
 
 # Add localhost for development
