@@ -26,7 +26,7 @@ from drill_suggestions import DrillManager
 from feedback_generator import generate_feedback, ScoreThresholds
 
 # ! memory loggin, only import in DEV
-import objgraph
+# import objgraph
 from pympler import muppy, summary
 
 import cv2
@@ -2522,28 +2522,28 @@ async def optimize_memory():
 
 # ! only in dev
 # ✅ Debug endpoint: only call this manually when you want to inspect memory
-@app.get("/debug/memory")
-def debug_memory():
-    # Force garbage collection first
-    gc.collect()
+# @app.get("/debug/memory")
+# def debug_memory():
+#     # Force garbage collection first
+#     gc.collect()
 
-    process = psutil.Process()
-    mem_info = process.memory_info()
+#     process = psutil.Process()
+#     mem_info = process.memory_info()
 
-    # --- Objgraph: show growth since start ---
-    growth = objgraph.growth(limit=10)  # top 10 growing types
+#     # --- Objgraph: show growth since start ---
+#     growth = objgraph.growth(limit=10)  # top 10 growing types
 
-    # --- Pympler: summarize objects in memory ---
-    all_objects = muppy.get_objects()
-    sum_list = summary.summarize(all_objects)
-    top_summary = summary.format_(sum_list[:10])  # top 10 types by size
+#     # --- Pympler: summarize objects in memory ---
+#     all_objects = muppy.get_objects()
+#     sum_list = summary.summarize(all_objects)
+#     top_summary = summary.format_(sum_list[:10])  # top 10 types by size
 
-    return {
-        "rss_mb": round(mem_info.rss / 1024 / 1024, 2),  # resident memory
-        "vms_mb": round(mem_info.vms / 1024 / 1024, 2),  # virtual memory
-        "objgraph_growth": growth,
-        "pympler_summary": top_summary,
-    }
+#     return {
+#         "rss_mb": round(mem_info.rss / 1024 / 1024, 2),  # resident memory
+#         "vms_mb": round(mem_info.vms / 1024 / 1024, 2),  # virtual memory
+#         "objgraph_growth": growth,
+#         "pympler_summary": top_summary,
+#     }
 
 @app.get("/processing-config/")
 async def get_processing_config():
