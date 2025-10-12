@@ -134,6 +134,7 @@ class DrillManager:
             response = query.execute()
             
             drills = response.data if response.data else []
+            logger.debug(f"Drills fetched from DB for area='{area}', level='{performance_level}': {drills}")
             
             # Cache the result
             self._cache[cache_key] = drills
@@ -271,6 +272,7 @@ class DrillManager:
             prioritized_drills = self._prioritize_drills(customized_drills, performance_level, user_id)
             
             logger.info(f"Generated {len(prioritized_drills)} customized drills")
+            logger.info(f"This is prioritized_drills: {prioritized_drills}")
             return prioritized_drills
             
         except Exception as e:
