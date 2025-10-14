@@ -67,19 +67,19 @@ class FeedbackGenerator:
         "left_knee": {
             "thresholds": [
                 (float('-inf'), 60, "showing excessive heel kick", "Try to open up your back knee more when landing your foot."),
-                (60, 80, "heel kick angle tighter than optimal", "Slightly open up your back knee more during foot landing."),
+                (60, 80, "showing heel kick angle tighter than optimal", "Slightly open up your back knee more during foot landing."),
                 (80, 120, "showing excellent heel kick", "Keep up this optimal heel kick in your back knee for each stride."),
-                (120, 140, "slightly low heel kick", "Allow for a slightly tighter heel kick for better stride efficiency."),
+                (120, 140, "showing slightly low heel kick", "Allow for a slightly tighter heel kick for better stride efficiency."),
                 (140, float('inf'), "showing very low heel kick", "Back knee is too open on foot landing - try for more heel kick."),
                 ("default", "positioned", "Continue monitoring your heel kick.")
             ]
         },
         "foot_strike": {
             "thresholds": [
-                (float('-inf'), 0, "excessive forefoot strike", "Land more on your midfoot rather than your forefoot."),
-                (0, 5, "slight forefoot strike", "Try to land a bit more toward your midfoot."),
-                (5, 10, "good midfoot landing", "Excellent foot strike pattern! This is optimal for efficiency."),
-                (10, 15, "slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
+                (float('-inf'), 0, "showing excessive forefoot strike", "Land more on your midfoot rather than your forefoot."),
+                (0, 5, "showing a slight forefoot strike", "Try to land a bit more toward your midfoot."),
+                (5, 10, "showing good midfoot landing", "Excellent foot strike pattern! This is optimal for efficiency."),
+                (10, 15, "showing a slight heel strike", "Focus on landing closer to your midfoot for better efficiency."),
                 (15, float('inf'), "landing on your heel", "Try to land more on your midfoot directly under your center of gravity."),
                 ("default", "positioned", "Continue monitoring your foot strike pattern.")
             ]
@@ -129,9 +129,9 @@ class FeedbackGenerator:
         elif area == "right_knee":
             feedback_str = f"Your front knee is {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "left_knee":
-            feedback_str = f"Your back knee is {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"Your back knee is showing {direction} (avg: {angle:.1f}°). {advice}"
         elif area == "foot_strike":
-            feedback_str = f"You are {direction} (avg: {angle:.1f}°). {advice}"
+            feedback_str = f"You have {direction} (avg: {angle:.1f}°). {advice}"
         else:
             feedback_str = f"Analysis shows {angle:.1f}° average for {area.replace('_', ' ')}."
 
