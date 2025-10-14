@@ -464,6 +464,9 @@ class DrillManager:
             "user_progress": drill.get("user_progress", {}),
             "safety_note": drill.get("safety_note"),
             "angle_specific": drill.get("angle_specific", False),
+            "reps": drill.get("reps"),
+            "sets": drill.get("sets"),
+            "rep_type": drill.get("rep_type"),
             "created_at": drill.get("created_at"),
             "updated_at": drill.get("updated_at")
         }

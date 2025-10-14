@@ -18,7 +18,7 @@ from per_frame_memory_monitor import (
     stop_frame_memory_monitoring
 )
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from supabase import create_client, Client
@@ -261,6 +261,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 # Initialize Supabase client and drill manager
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 drill_manager = DrillManager(supabase)
+router = APIRouter()
 
 # Configuration
 video_config = VideoConfig()
@@ -2545,6 +2546,13 @@ async def optimize_memory():
 #         "objgraph_growth": growth,
 #         "pympler_summary": top_summary,
 #     }
+
+@router.post("/drills/clear-cache/")
+async def clear_drills_cache():
+    drill_manager.clear_cache()
+    return {"status": "cache cleared"}
+
+app.include_router(router)
 
 @app.get("/processing-config/")
 async def get_processing_config():
