@@ -243,52 +243,76 @@ class PoseDetector():
             
                 return knee_angle
 
-    def findHeadPosition(self, frame, left_eye_id = 2, right_eye_id = 5, left_ear_id = 7, right_ear_id = 8, draw=True):
-        # print("findHeadPosition called!")
+    # def findHeadPosition(self, frame, left_eye_id = 2, right_eye_id = 5, left_ear_id = 7, right_ear_id = 8, draw=True):
+    #     # print("findHeadPosition called!")
 
-        # landmark existence check
+    #     # landmark existence check
+    #     if not len(self.lmList) > max(left_ear_id, right_ear_id):
+    #         return None
+
+    #     # calculate midpoints of eyes and ears
+    #     x_eyes_mid = (self.lmList[left_eye_id][1] + self.lmList[right_eye_id][1]) / 2
+    #     y_eyes_mid = (self.lmList[left_eye_id][2] + self.lmList[right_eye_id][2]) / 2
+        
+    #     x_ear_mid = (self.lmList[left_ear_id][1] + self.lmList[right_ear_id][1]) / 2
+    #     y_ear_mid = (self.lmList[left_ear_id][2] + self.lmList[right_ear_id][2]) / 2
+        
+    #     # compute vector from eye to ear
+    #     dx = x_ear_mid - x_eyes_mid
+    #     dy = y_ear_mid - y_eyes_mid
+
+    #     head_angle = math.degrees(math.atan2(dy, dx)) # calculate angle relative to horizontal
+    #     c_head_angle = 180 - head_angle
+    def findHeadPosition(self, frame, left_eye_id=2, right_eye_id=5, left_ear_id=7, right_ear_id=8, draw=True):
         if not len(self.lmList) > max(left_ear_id, right_ear_id):
             return None
 
-        # calculate midpoints of eyes and ears
+        # Midpoint between eyes
         x_eyes_mid = (self.lmList[left_eye_id][1] + self.lmList[right_eye_id][1]) / 2
         y_eyes_mid = (self.lmList[left_eye_id][2] + self.lmList[right_eye_id][2]) / 2
-        
+
+        # Midpoint between ears
         x_ear_mid = (self.lmList[left_ear_id][1] + self.lmList[right_ear_id][1]) / 2
         y_ear_mid = (self.lmList[left_ear_id][2] + self.lmList[right_ear_id][2]) / 2
-        
-        # compute vector from eye to ear
-        dx = x_ear_mid - x_eyes_mid
-        dy = y_ear_mid - y_eyes_mid
 
-        head_angle = math.degrees(math.atan2(dy, dx)) # calculate angle relative to horizontal
-        c_head_angle = 180 - head_angle
-            
+        # Vector from ear midpoint to eye midpoint
+        dx = x_eyes_mid - x_ear_mid
+        dy = y_eyes_mid - y_ear_mid
+
+        angle_rad = math.atan2(dy, dx)
+        angle_deg = math.degrees(angle_rad)
+        angle_deg = -angle_deg
+        # Normalize to [-180, 180]
+        if angle_deg > 180:
+            angle_deg -= 360
+        elif angle_deg < -180:
+            angle_deg += 360
+
         # draw lines and stuff if needed
-        h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
-        scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
+        h, w = frame.shape[:2]
+        scale = min(w, h) / 1000
 
         if draw:
-            thickness = max(1, int(1 * scale))  # Thinner lines
-            radius = max(3, int(4 * scale))     # Smaller inner circles
-            radius_outer = max(5, int(6 * scale)) # Slightly larger outer circles
-            font_scale = 0.8 * scale             # Smaller font
-            font_thickness = max(1, int(1 * scale)) # Thinner font
+            thickness = max(1, int(1 * scale))
+            radius = max(3, int(4 * scale))
+            radius_outer = max(5, int(6 * scale))
+            font_scale = 0.8 * scale
+            font_thickness = max(1, int(1 * scale))
 
             # Head position line (center/neutral - green)
             line_color = (0, 255, 0)  # Green for head/center measurements
-            
+
             cv2.line(frame, (int(x_ear_mid), int(y_ear_mid)), (int(x_eyes_mid), int(y_eyes_mid)), line_color, thickness)
             cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius, (0, 0, 255), cv2.FILLED)
             cv2.circle(frame, (int(x_eyes_mid), int(y_eyes_mid)), radius_outer, (0, 0, 255), thickness)
             cv2.circle(frame, (int(x_ear_mid), int(y_ear_mid)), radius, (0, 0, 255), cv2.FILLED)
             cv2.circle(frame, (int(x_ear_mid), int(y_ear_mid)), radius_outer, (0, 0, 255), thickness)
 
-            text = str(int(c_head_angle))
+            text = str(int(angle_deg))
             (text_width, text_height), baseline = cv2.getTextSize(
                     text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
                 
-            # Position text near point p2
+            # Position text near ear midpoint
             text_x = x_ear_mid - int(20 * scale)
             text_y = y_ear_mid + int(20 * scale)
 
@@ -303,7 +327,7 @@ class PoseDetector():
             cv2.putText(frame, text, (int(text_x), int(text_y)),
                         cv2.FONT_HERSHEY_PLAIN, font_scale,
                         (0, 255, 0), font_thickness)
-        return c_head_angle
+        return angle_deg
 
     def findTorsoLean(self, frame, left_ear_id=7, right_ear_id=8, left_hip_id=23, right_hip_id=24, draw=True):
         if len(self.lmList) > max(right_ear_id, right_hip_id):
