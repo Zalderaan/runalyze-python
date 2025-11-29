@@ -20,12 +20,12 @@ from per_frame_memory_monitor import (
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from supabase import create_client, Client
 from drill_suggestions import DrillManager
 from feedback_generator import generate_feedback, ScoreThresholds
 
-# ! memory loggin, only import in DEV
+# ! memory logging, only import in DEV
 # import objgraph
 # from pympler import muppy, summary
 
@@ -59,6 +59,24 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Global progress storage (use Redis in production for multiple workers)
+progress_storage = {}
+results_storage = {}
+
+# Add progress tracking class
+class ProgressTracker:
+    def __init__(self):
+        self.current_stage = ""
+        self.progress_percent = 0
+        self.message = ""
+        self.frame_progress = {"current": 0, "total": 0}
+    
+    def update(self, stage: str, progress: float, message: str = "", current_frame: int = 0, total_frames: int = 0):
+        self.current_stage = stage
+        self.progress_percent = progress
+        self.message = message
+        self.frame_progress = {"current": current_frame, "total": total_frames}
 
 # Enhanced memory monitoring
 class MemoryTracker:
@@ -216,6 +234,7 @@ app = FastAPI(
 
 # CORS configuration
 CORS_ORIGINS = [
+    "http://localhost:3000",
     "https://runalyze.online",
     "https://www.runalyze.online",  # Your Vercel app
 ]
@@ -1149,9 +1168,9 @@ def process_frame_with_scaling(frame, detector, processing_width, processing_hei
         logger.error(f"Error in process_frame_with_scaling: {e}")
         return frame, None, None
 
-def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames, 
+async def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames, 
                                     processing_width, processing_height, 
-                                    original_width, original_height, scale_factor, rotation=0):
+                                    original_width, original_height, scale_factor, rotation=0, tracker=None):
     """
     Stream-based video processing with enhanced per-frame memory optimization and monitoring.
     
@@ -1207,6 +1226,20 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
             for i, frame in enumerate(batch_frames):
                 current_frame_num = batch_start + i + 1
                 
+                # ✅ UPDATE PROGRESS EVERY FRAME (not every 5)
+                if tracker:
+                    progress = 20 + (current_frame_num / total_frames) * 65  # 20-85%
+                    tracker.update(
+                        "processing",
+                        progress,
+                        f"Processing frame {current_frame_num}/{total_frames}",
+                        current_frame_num,
+                        total_frames
+                    )
+                    
+                    # ✅ CRITICAL: Add tiny delay to ensure SSE sees the update
+                    # This allows the event loop to process the update before continuing
+                    await asyncio.sleep(0.01)  # 10ms delay - allows SSE to catch up
                 try:
                     # Log memory before frame processing
                     log_frame_memory(
@@ -1272,11 +1305,9 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                     
                 except Exception as e:
                     logger.error(f"Error processing frame {current_frame_num}: {e}")
-                    # Write original frame if processing fails
                     out.write(frame)
                     del frame
                     
-                    # Log memory for failed frame
                     log_frame_memory(
                         current_frame_num, 
                         total_frames, 
@@ -1284,9 +1315,21 @@ def process_video_streaming_optimized(cap, out, detector, analyzer, total_frames
                         {"error": str(e)}
                     )
             
+            # ✅ UPDATE PROGRESS AFTER EACH BATCH (keep this too)
+            if tracker:
+                progress = 20 + (frame_count / total_frames) * 65
+                tracker.update(
+                    "processing",
+                    progress,
+                    f"Completed batch {frame_count//batch_size + 1}",
+                    frame_count,
+                    total_frames
+                )
+                await asyncio.sleep(0.01)  # Allow SSE to catch the batch update
+            
             # Clear batch from memory
             del batch_frames
-            gc.collect()  # Force garbage collection after each batch
+            gc.collect()
             log_memory_usage("AFTER_BATCH_CLEANUP")
             
             # Log memory after batch cleanup
@@ -1687,6 +1730,687 @@ def cleanup_old_tmp_files(max_age_hours=24):
             
     except Exception as e:
         logger.error(f"Error in cleanup_old_tmp_files: {e}")
+
+@app.post("/process-video-async")
+async def process_video_async(
+    file: UploadFile = File(...),
+    user_id: str = Form(...)    
+):
+    """Start video processing and return job ID"""
+    job_id = str(uuid.uuid4())
+    progress_storage[job_id] = ProgressTracker()
+
+    # ✅ Save file FIRST before starting background task
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(f"tmp/{user_id}", exist_ok=True)
+    
+    video_path = f"tmp/{user_id}/{timestamp}_{file.filename}"
+    
+    # Save the uploaded file
+    with open(video_path, "wb") as buffer:
+        content = await file.read()  # ✅ Read file HERE, not in background task
+        buffer.write(content)
+    
+    logger.info(f"File saved to {video_path}, starting background processing")
+    
+    # ✅ Pass the VIDEO PATH and FILENAME instead of the file object
+    asyncio.create_task(
+        process_video_background(video_path, file.filename, user_id, job_id)
+    )  
+
+    return {"job_id": job_id, "status": "processing"}
+
+@app.get("/progress/{job_id}")
+async def progress_stream(job_id: str):
+    """Stream progress updates via SSE"""
+    
+    async def event_generator():
+        if job_id not in progress_storage:
+            logger.error(f"Invalid job_id requested: {job_id}")
+            yield f"data: {json.dumps({'error': 'Invalid job ID', 'stage': 'error'})}\n\n"
+            return
+        
+        logger.info(f"Starting SSE stream for job_id: {job_id}")
+        
+        try:
+            # ✅ Send initial connection message immediately
+            yield f": connected\n\n"
+            
+            last_progress = -1  # Track last sent progress to avoid duplicates
+            
+            while job_id in progress_storage:
+                tracker = progress_storage[job_id]
+                
+                # ✅ Only send if progress changed
+                if tracker.progress_percent != last_progress:
+                    data = {
+                        "stage": tracker.current_stage,
+                        "progress": tracker.progress_percent,
+                        "message": tracker.message,
+                        "frame_progress": tracker.frame_progress
+                    }
+                    
+                    # ✅ CRITICAL: Format with double newline to ensure message boundary
+                    message = f"data: {json.dumps(data)}\n\n"
+                    logger.info(f"SSE sending: {data['stage']} - {data['progress']}%")  # ✅ Enhanced logging
+                    yield message
+                    
+                    last_progress = tracker.progress_percent
+                    
+                    # Check if complete or error
+                    if tracker.progress_percent >= 100 or tracker.current_stage == "error":
+                        logger.info(f"SSE stream ending for job_id: {job_id}, stage: {tracker.current_stage}")
+                        break
+                
+                # ✅ REDUCED polling interval for more frequent updates
+                await asyncio.sleep(0.1)  # Changed from 0.2 to 0.1 seconds
+                
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            yield f"data: {json.dumps({'error': str(e), 'stage': 'error'})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # ✅ Disable nginx buffering
+            "Content-Type": "text/event-stream",
+        }
+    )
+
+@app.get("/result/{job_id}")
+async def get_result(job_id: str):
+    """Get final processing result"""
+    
+    # ✅ Check if still processing
+    if job_id in progress_storage and job_id not in results_storage:
+        tracker = progress_storage[job_id]
+        return JSONResponse(
+            status_code=202,  # 202 = Accepted (still processing)
+            content={
+                "status": "processing",
+                "stage": tracker.current_stage,
+                "progress": tracker.progress_percent,
+                "message": tracker.message
+            }
+        )
+    
+    # ✅ Check if results are ready
+    if job_id not in results_storage:
+        logger.error(f"Result not found for job_id: {job_id}")
+        logger.info(f"Available job_ids in results_storage: {list(results_storage.keys())}")
+        raise HTTPException(status_code=404, detail="Result not found or expired")
+    
+    result = results_storage[job_id]
+    
+    # ✅ Clean up after retrieving result (give frontend time to fetch)
+    # Don't delete immediately - frontend might retry
+    # You can add a cleanup task or let the frontend call a separate cleanup endpoint
+    
+    return result
+
+@app.delete("/result/{job_id}")
+async def cleanup_result(job_id: str):
+    """Clean up result and progress storage after frontend has retrieved it"""
+    if job_id in results_storage:
+        del results_storage[job_id]
+    if job_id in progress_storage:
+        del progress_storage[job_id]
+    
+    return {"status": "cleaned", "job_id": job_id}
+
+async def process_video_background(video_path: str, filename: str, user_id: str, job_id: str):
+    """Background video processing with progress updates"""
+    tracker = progress_storage[job_id]
+    
+    # Start enhanced memory tracking
+    memory_tracker.start_tracking()
+    
+    # Initialize processors
+    video_processor = VideoProcessor()
+    detector = pm.PoseDetector()         # <-- Move here
+    analyzer = rfa.RFAnalyzer()
+
+    # initialize all variables at the start
+    contact_results = {"right_landing": False}
+    final_video_path = None
+    cap = None  # Initialize cap variable
+    out = None  # Initialize out variable
+
+    print("uid: ", user_id)
+    # create dir
+    os.makedirs(f"tmp/{user_id}/processed", exist_ok=True) 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    original_filename = f"{timestamp}_{filename}"  # ✅ Use passed filename
+
+    # save video to temporary loc
+    # video_path = f"tmp/{user_id}/{file.filename}"
+    annotated_video_path = f"tmp/{user_id}/processed/processed_{filename}"
+
+    try:
+        # === STAGE 1: FILE ALREADY UPLOADED ===
+        tracker.update("upload", 5, "File uploaded, starting processing...")
+        await asyncio.sleep(0.1)
+        print("=== STAGE 1: FILE UPLOADED ===")
+        
+        # ✅ Get file size from saved file
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        log_memory_usage("AFTER_FILE_UPLOAD", f"File: {filename} ({file_size_mb:.1f}MB)")
+
+        # === STAGE 2: THUMBNAIL EXTRACTION ===
+        tracker.update("thumbnail", 10, "Extracting thumbnail...")
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 2: EXTRACTING THUMBNAIL ===")
+        log_memory_usage("BEFORE_THUMBNAIL_EXTRACTION")
+        
+        video_uuid = str(uuid.uuid4())
+        thumbnail_path = f"tmp/{user_id}/thumbnail_{timestamp}.jpg"
+        thumbnail_extracted = video_processor.extract_thumbnail(video_path, thumbnail_path, 1.0)
+        
+        log_memory_usage("AFTER_THUMBNAIL_EXTRACTION")
+
+        # === STAGE 3: THUMBNAIL UPLOD ===
+        thumbnail_url = None
+        if thumbnail_extracted:
+            print("=== STAGE 3: UPLOADING THUMBNAIL ===")
+            log_memory_usage("BEFORE_THUMBNAIL_UPLOAD")
+            thumbnail_url = storage_manager.upload_thumbnail(user_id, thumbnail_path, video_uuid)
+            log_memory_usage("AFTER_THUMBNAIL_UPLOAD")
+
+        # === STAGE 4: VIDEO ORIENTATION DETECTION ===
+        tracker.update("detection", 15, "Detecting video orientation...")
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 4: DETECTING VIDEO ORIENTATION ===")
+        log_memory_usage("BEFORE_ROTATION_DETECTION")
+        
+        # process with MP pose
+        cap = cv2.VideoCapture(video_path)
+        
+        # ✓ Detect rotation and fix video orientation BEFORE processing
+        rotation = VideoProcessor.get_video_rotation(video_path)
+        logger.info(f"Detected rotation for processing: {rotation}°")
+        
+        log_memory_usage("AFTER_ROTATION_DETECTION", f"Rotation: {rotation}°")
+
+        # === STAGE 5: OPTIMIZED VIDEO SETUP (STREAM PROCESSING) ===
+        tracker.update("setup", 20, "Setting up video processing...")
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 5: SETTING UP STREAM PROCESSING ===")
+        log_memory_usage("BEFORE_STREAM_SETUP")
+        
+        # Instead of creating corrected video file, we'll apply rotation per frame
+        # This saves disk space and memory by avoiding temporary file creation
+        corrected_video_path = video_path  # Keep reference to original
+        apply_rotation_per_frame = rotation != 0
+        
+        if apply_rotation_per_frame:
+            logger.info(f"Will apply {rotation}° rotation per frame during streaming (no temp file)")
+        else:
+            logger.info("No rotation needed, processing original video directly")
+        
+        log_memory_usage("AFTER_STREAM_SETUP", f"Stream mode, rotation: {rotation}°")
+
+        # === STAGE 6: VIDEO ANALYSIS SETUP ===
+        print("=== STAGE 6: SETTING UP VIDEO ANALYSIS ===")
+        log_memory_usage("BEFORE_VIDEO_ANALYSIS_SETUP")
+        
+        # Process the original video (rotation applied per frame)
+        cap = cv2.VideoCapture(video_path)
+        
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Calculate corrected dimensions for output video
+        if apply_rotation_per_frame and (rotation == 90 or rotation == 270):
+            # For 90/270° rotation, swap width and height
+            width = original_height
+            height = original_width
+            logger.info(f"Output dimensions swapped for rotation: {width}x{height}")
+        else:
+            width = original_width
+            height = original_height
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        duration_seconds = total_frames / fps if fps > 0 else 0
+        
+        MAX_DURATION = 10
+
+        if duration_seconds > MAX_DURATION:
+            # Clean up resources
+            if cap:
+                cap.release()
+            cv2.destroyAllWindows()
+            cleanup_temp_enhanced(video_path, thumbnail_path)
+            
+            # ✅ Create error details as a dict
+            error_details = {
+                "error": "Video too long",
+                "message": f"Video duration is {duration_seconds:.1f}s. Maximum allowed is {MAX_DURATION}s.",
+                "duration_seconds": round(duration_seconds, 1),
+                "max_duration": MAX_DURATION,
+                "suggestions": [
+                    f"Please trim your video to under {MAX_DURATION} seconds",
+                    "Focus on capturing 5-10 seconds of continuous running",
+                    "Shorter videos process faster and provide focused feedback"
+                ]
+            }
+            
+            # ✅ Update tracker with just the message string
+            tracker.update("error", 0, error_details["message"])
+            await asyncio.sleep(0.1)
+            
+            # ✅ Store detailed error in results
+            results_storage[job_id] = {
+                "success": False,
+                "error": error_details["error"],
+                "message": error_details["message"],
+                "details": error_details,
+                "status_code": 400
+            }
+            
+            # Don't raise HTTPException - we're already in background task
+            return
+
+        logger.info(f"Video duration validation passed: {duration_seconds:.1f}s")
+        print(f"Video duration: {duration_seconds:.1f}s (valid)")
+        
+        # DON'T overwrite the corrected dimensions - keep the calculated width/height
+        logger.info(f"Final output video dimensions: {width}x{height} (rotation: {rotation}°)")
+        
+        video_info = f"{width}x{height}, {total_frames}f, {duration_seconds:.1f}s"
+        logger.info(f"Processing corrected video dimensions: {width}x{height}")
+        print(f"Video properties: {video_info}")
+        
+        log_memory_usage("AFTER_VIDEO_ANALYSIS_SETUP", video_info)
+
+        # === STAGE 6.5: RUNNING ACTIVITY DETECTION ===
+        tracker.update("processing", 25, "Processing frames...", 0, total_frames)
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 6.5: DETECTING RUNNING ACTIVITY ===")
+        log_memory_usage("BEFORE_RUNNING_DETECTION")
+
+        # Detect if video contains running activity
+        running_detection = detect_running_activity(video_path, detector, min_samples=10, confidence_threshold=0.65)
+
+        if not running_detection["is_running"]:
+            # Clean up resources before returning error
+            if cap:
+                cap.release()
+            cv2.destroyAllWindows()
+            
+            # Clean up uploaded file
+            cleanup_temp_enhanced(video_path, thumbnail_path)
+            
+            # Return error response
+            raise HTTPException(
+                status_code=running_detection.get("status_code", 400),
+                detail={
+                    "error": "Invalid video content",
+                    "message": running_detection["reason"],
+                    "confidence": running_detection["confidence"],
+                    "details": running_detection["details"],
+                    "suggestions": [
+                        "Please upload a video showing running activity",
+                        "Ensure the person is clearly visible and in motion",
+                        "Video should show running gait with alternating leg movement",
+                        "Avoid videos of walking, standing, or other non-running activities"
+                    ]
+                }
+            )
+
+        logger.info(f"Running detection passed: {running_detection['confidence']:.1%} confidence")
+        print(f"Running activity confirmed: {running_detection['confidence']:.1%} confidence")
+        log_memory_usage("AFTER_RUNNING_DETECTION", f"Confidence: {running_detection['confidence']:.1%}")
+    
+        # === STAGE 7: OUTPUT VIDEO WRITER SETUP ===
+        print("=== STAGE 7: SETTING UP OUTPUT VIDEO WRITER ===")
+        log_memory_usage("BEFORE_OUTPUT_WRITER_SETUP")
+        
+        # -- ready output
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # codec for output video
+        out = cv2.VideoWriter(annotated_video_path, fourcc, 30.0, (width,height), isColor=True)
+
+        prev_lmList = None
+        measure_list = None
+
+        if not cap.isOpened():
+            raise Exception("Error: cannot open video file")
+
+        log_memory_usage("AFTER_OUTPUT_WRITER_SETUP")
+
+        # === STAGE 8: MEMORY-OPTIMIZED PROCESSING ===
+        print("=== STAGE 8: STARTING MEMORY-OPTIMIZED PROCESSING ===")
+        
+        # Get optimal processing resolution for memory efficiency
+        processing_width, processing_height, scale_factor = get_optimal_processing_size(
+            original_width, original_height, max_memory_mb=400
+        )
+        
+        logger.info(f"Video processing optimization:")
+        logger.info(f"  Original: {original_width}x{original_height}")
+        logger.info(f"  Processing: {processing_width}x{processing_height}")
+        logger.info(f"  Scale factor: {scale_factor:.3f}")
+        logger.info(f"  Output: {width}x{height}")
+        
+        video_info = f"{width}x{height}, {total_frames}f, {duration_seconds:.1f}s, scale: {scale_factor:.2f}"
+        log_memory_usage("PROCESSING_START", f"Optimized processing: {video_info}")
+
+        # Use optimized streaming processing with per-frame memory monitoring
+        frame_count, processed_frames, processing_time, memory_stats = await process_video_streaming_optimized(
+            cap, out, detector, analyzer, total_frames,
+            processing_width, processing_height, 
+            original_width, original_height, scale_factor, rotation,
+            tracker=tracker  # ← Pass the tracker
+        )
+        
+        processing_stats = f"{frame_count} frames, {processed_frames} analyzed, {processing_time:.1f}s total"
+        memory_summary = f"Peak: {memory_stats.get('summary', {}).get('peak_memory_mb', 0):.1f}MB, Avg FPS: {memory_stats.get('summary', {}).get('average_fps', 0):.1f}"
+        print(f"=== OPTIMIZED PROCESSING COMPLETE: {processing_stats} ===")
+        print(f"=== MEMORY STATISTICS: {memory_summary} ===")
+        log_memory_usage("PROCESSING_COMPLETE", f"{processing_stats}, {memory_summary}")
+
+        # === STAGE 9: ANALYSIS SUMMARY ===
+        tracker.update("analyzing", 87, "Generating analysis summary...")
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 9: GENERATING ANALYSIS SUMMARY ===")
+        log_memory_usage("BEFORE_ANALYSIS_SUMMARY")
+        
+        analysis_summary = analyzer.get_summary()  # Get aggregated results
+        print("Analysis summary:", analysis_summary)
+        analyzer.reset() if hasattr(analyzer, "reset") else None
+        detector.reset() if hasattr(detector, "reset") else None
+        gc.collect()
+        log_memory_usage("AFTER_ANALYZER_RESET")
+
+        
+        
+        log_memory_usage("AFTER_ANALYSIS_SUMMARY")
+
+        # === STAGE 10: RESOURCE CLEANUP ===
+        print("=== STAGE 10: RELEASING VIDEO RESOURCES ===")
+        log_memory_usage("BEFORE_RESOURCE_CLEANUP")
+        
+        # Properly release resources before file operations
+        if cap:
+            cap.release()
+        if out:
+            out.release()
+        cv2.destroyAllWindows()
+
+        # Add small delay to ensure file handles are released
+        time.sleep(0.1)
+        
+        # Check output file size
+        if os.path.exists(annotated_video_path):
+            output_size_mb = os.path.getsize(annotated_video_path) / (1024 * 1024)
+            print(f"Annotated video created: {output_size_mb:.1f}MB")
+
+        log_memory_usage("AFTER_RESOURCE_CLEANUP", f"Output: {output_size_mb:.1f}MB")
+
+        # === STAGE 11: VIDEO POST-PROCESSING ===
+        tracker.update("postprocessing", 90, "Adding faststart metadata...")
+        
+        await asyncio.sleep(0.1)
+        print("=== STAGE 11: ADDING FASTSTART TO VIDEO ===")
+        log_memory_usage("BEFORE_VIDEO_POSTPROCESSING")
+        
+        final_video_path = video_processor.add_faststart(annotated_video_path)
+        
+        if os.path.exists(final_video_path):
+            final_size_mb = os.path.getsize(final_video_path) / (1024 * 1024)
+            print(f"Final video created: {final_size_mb:.1f}MB")
+        
+        log_memory_usage("AFTER_VIDEO_POSTPROCESSING", f"Final: {final_size_mb:.1f}MB")
+
+        # === STAGE 12: UPLOADING TO STORAGE ===
+        tracker.update("uploading", 94, "Analysis complete!")
+        await asyncio.sleep(0.1)
+        
+        print("=== STAGE 12: UPLOADING PROCESSED VIDEO ===")
+        log_memory_usage("BEFORE_VIDEO_UPLOAD")
+        
+        download_url, _ = storage_manager.upload_video(user_id, final_video_path, f"processed_{original_filename}", video_uuid)
+
+        if not download_url:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to upload video to supabase storage"
+            )
+        
+        log_memory_usage("AFTER_VIDEO_UPLOAD")
+
+        # === STAGE 13: GENERATING AI FEEDBACK ===
+        tracker.update("feedback", 96, "Generating AI feedback...")
+        await asyncio.sleep(0.1)
+        
+        print("=== STAGE 13: GENERATING AI FEEDBACK ===")
+        log_memory_usage("BEFORE_FEEDBACK_GENERATION")
+        
+        feedback = await generate_feedback(analysis_summary, user_id, drill_manager)
+        
+        log_memory_usage("AFTER_FEEDBACK_GENERATION")
+
+        # === STAGE 14: DATABASE OPERATIONS ===
+        tracker.update("saving", 98, "Saving to database...")
+        await asyncio.sleep(0.1)
+        
+        print("=== STAGE 14: SAVING TO DATABASE ===")
+        log_memory_usage("BEFORE_DATABASE_OPERATIONS")
+        
+        analysis_result = database_manager.create_analysis(user_id, download_url, thumbnail_url, analysis_summary, feedback)
+        
+        log_memory_usage("AFTER_DATABASE_OPERATIONS")
+
+        # === FINAL RESPONSE ===
+        print("=== PROCESSING COMPLETE ===")
+        final_memory_summary = memory_tracker.stop_tracking()
+        
+        response_data = {
+            "user_id": user_id,
+            "success": True,
+            "message": "Video processing successful",
+            "download_url": download_url,
+            "thumbnail_url": thumbnail_url,
+            "analysis_summary": analysis_summary,
+            "processing_stats": {
+                "total_frames": frame_count,
+                "processed_frames": processed_frames,
+                "processing_time_seconds": processing_time,
+                "processing_fps": round(frame_count / processing_time, 2) if processing_time > 0 else 0,
+                "input_file_size_mb": round(file_size_mb, 2),
+                "output_file_size_mb": round(final_size_mb, 2) if 'final_size_mb' in locals() else None,
+                "video_duration_seconds": round(duration_seconds, 2),
+                "video_resolution": f"{width}x{height}"
+            },
+            "memory_stats": final_memory_summary,
+            "running_detection": {
+                "confidence": running_detection["confidence"],
+                "details": running_detection["details"]
+            }
+        }
+        response_data["database_records"] = analysis_result
+
+        # Print memory summary for easy viewing
+        print("\n=== MEMORY USAGE SUMMARY ===")
+        print(f"Peak Memory: {final_memory_summary.get('peak_memory_mb', 0)}MB")
+        print(f"Memory Increase: {final_memory_summary.get('total_increase_mb', 0)}MB")
+        print(f"Memory Intensive Stages: {final_memory_summary.get('memory_intensive_stages', [])}")
+        print("===========================\n")
+
+        # Store final result
+        results_storage[job_id] = {
+            "success": True,
+            "download_url": download_url,
+            "analysis_summary": analysis_summary,
+            "database_records": analysis_result
+        }
+
+        tracker.update("complete", 100, "Analysis complete!")
+        await asyncio.sleep(0.1)
+        
+    except HTTPException as http_err:  # ✅ Handle HTTPException separately
+        logger.error(f"HTTP error in background processing: {http_err.detail}")
+        tracker.update("error", 0, str(http_err.detail))
+        await asyncio.sleep(0.1)
+        
+        # ✅ Store error result
+        results_storage[job_id] = {
+            "success": False,
+            "error": str(http_err.detail),
+            "status_code": http_err.status_code
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in background processing: {e}")
+        tracker.update("error", 0, f"Error: {str(e)}")
+        await asyncio.sleep(0.1)
+        
+        # ✅ Store error result
+        results_storage[job_id] = {
+            "success": False,
+            "error": str(e)
+        }
+        
+    finally:
+        # === ENHANCED RESOURCE CLEANUP ===
+        print("=== STARTING ENHANCED CLEANUP ===")
+        log_memory_usage("CLEANUP_START")
+        
+        # Immediate resource release with error handling
+        try:
+            if 'cap' in locals() and cap:
+                cap.release()
+                cap = None
+            if 'out' in locals() and out:
+                out.release()
+                out = None
+            cv2.destroyAllWindows()
+            log_memory_usage("AFTER CAP RELEASE")
+            immediate_resource_cleanup(cap, out) # Force immediate cleanup of large objects
+        except Exception as e:
+            logger.error(f"Error releasing video resources: {e}")
+            
+        # Set heavy objects to None to help garbage collection
+        detector.pose.close() # <-- fix here, close the pose object
+        detector = None
+        analyzer = None
+
+        video_processor = None
+        # del cap, out
+
+        gc.collect() # Memory cleanup before file operations
+        time.sleep(0.3) # Add delay before cleanup (important on Windows)
+        
+        # Build comprehensive cleanup list
+        cleanup_files = []
+        
+        # Add files that should always be cleaned up
+        if 'video_path' in locals() and video_path:
+            cleanup_files.append(video_path)
+        if 'thumbnail_path' in locals() and thumbnail_path:
+            cleanup_files.append(thumbnail_path)
+        if 'annotated_video_path' in locals() and annotated_video_path:
+            cleanup_files.append(annotated_video_path)
+        
+        # Add conditional files
+        if 'final_video_path' in locals() and final_video_path and final_video_path != annotated_video_path:
+            cleanup_files.append(final_video_path)
+        
+        # Add corrected video if it was created and is different from original
+        try:
+            if 'rotation' in locals() and 'corrected_video_path' in locals():
+                if rotation != 0 and corrected_video_path != video_path and corrected_video_path not in cleanup_files:
+                    cleanup_files.append(corrected_video_path)
+        except:
+            pass
+        
+        # Enhanced cleanup with retry logic
+        cleanup_temp_enhanced(*cleanup_files)
+        
+        # Log files that would be cleaned up for debugging
+        # logger.info("=== CLEANUP DISABLED FOR DEBUGGING ===")
+        # logger.info("Files that would be cleaned up:")
+        # for file_path in cleanup_files:
+        #     if os.path.exists(file_path):
+        #         logger.info(f"  EXISTS: {file_path}")
+        #     else:
+        #         logger.info(f"  MISSING: {file_path}")
+        # logger.info("=== END CLEANUP DEBUG INFO ===")
+        
+        # Keep files for inspection, but still do memory cleanup
+        
+        # Memory cleanup after file operations
+        gc.collect()
+        log_memory_usage("CLEANUP_FILES_COMPLETE")
+        
+        # Clean up user directory if too many leftover files
+        try:
+            if 'user_id' in locals() and user_id:
+                user_tmp_dir = f"tmp/{user_id}"
+                if os.path.exists(user_tmp_dir):
+                    files_in_dir = []
+                    for root, dirs, files in os.walk(user_tmp_dir):
+                        files_in_dir.extend([os.path.join(root, f) for f in files])
+                    
+                    if len(files_in_dir) > 5:  # Too many leftover files
+                        # TODO: Temporarily disabled user folder cleanup for debugging
+                        logger.warning(f"Many leftover files detected for user {user_id}, cleaning up folder")
+                        cleanup_user_tmp_folder(user_id)
+                        gc.collect()
+                        logger.info(f"CLEANUP DISABLED: Found {len(files_in_dir)} files for user {user_id}, but cleanup disabled for debugging")
+                        logger.info(f"Files in user directory: {[os.path.basename(f) for f in files_in_dir]}")
+        except Exception as e:
+            logger.error(f"Error in user directory cleanup: {e}")
+        
+        # Final memory tracking and cleanup
+        try:
+            if hasattr(memory_tracker, 'memory_history') and memory_tracker.memory_history:
+                if len(memory_tracker.memory_history) > 0:  # Check if tracking is still active
+                    final_summary = memory_tracker.stop_tracking()
+                    logger.info(f"FINAL MEMORY SUMMARY: {final_summary}")
+                    
+                    # Log memory efficiency
+                    peak_memory = final_summary.get('peak_memory_mb', 0)
+                    total_increase = final_summary.get('total_increase_mb', 0)
+                    print(f"=== MEMORY EFFICIENCY REPORT ===")
+                    print(f"Peak Memory: {peak_memory}MB")
+                    print(f"Total Increase: {total_increase}MB")
+                    print(f"Memory Efficient: {'YES' if total_increase < 500 else 'NO'}")
+                    print("================================")
+                    
+        except Exception as e:
+            logger.error(f"Error in final memory tracking: {e}")
+        
+        # === MEMORY DEBUGGING AFTER CLEANUP ===
+        # print("=== OBJGRAPH: Most common objects after cleanup ===")
+        # objgraph.show_most_common_types(limit=10)
+        # print("=== OBJGRAPH: Growth since startup ===")
+        # objgraph.show_growth(limit=5)
+        # print("=== PYMPLER: Memory summary after cleanup ===")
+        # all_objects = muppy.get_objects()
+        # sum_stats = summary.summarize(all_objects)
+        # summary.print_(sum_stats)
+
+        # Final garbage collection
+        # del scores_history, angles_history
+        gc.collect()
+        log_memory_usage("AFTER_FINAL_GC")
+        
+        # ✅ DON'T DELETE from progress_storage - let frontend cleanup endpoint handle it
+        # The progress tracker stays available so frontend can check status if needed
+        logger.info(f"Background processing finished for job_id: {job_id}")
+        logger.info(f"Results stored and available at /result/{job_id}")
+        logger.info(f"Progress tracker still available for status checks")
+        
+        print("=== ENHANCED CLEANUP COMPLETE ===")
 
 @app.post("/process-video/")
 async def process_video(

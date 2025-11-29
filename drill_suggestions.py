@@ -224,6 +224,11 @@ class DrillManager:
             # Get base drills from database
             drills = await self.get_drills_from_database(area, performance_level)
             
+            # ✅ Add this logging
+            logger.info(f"Fetched {len(drills)} drills for area='{area}', level='{performance_level}'")
+            if len(drills) == 0:
+                logger.warning(f"⚠️ NO DRILLS FOUND for {area} + {performance_level}")
+            
             if not drills:
                 logger.info(f"No drills found for area='{area}', level='{performance_level}'")
                 return []
@@ -455,6 +460,8 @@ class DrillManager:
             "frequency": drill.get("frequency", "As needed"),
             "instructions": drill.get("instructions", []),
             "video_url": drill.get("video_url"),
+            "justification": drill.get("justification"),
+            "reference": drill.get("reference"),
             "difficulty_level": max(1, min(5, drill.get("difficulty_level", 1))),  # Ensure 1-5 range
             "focus_note": drill.get("focus_note"),
             "intensity": drill.get("intensity"),
