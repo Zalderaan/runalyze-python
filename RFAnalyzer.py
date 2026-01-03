@@ -123,17 +123,16 @@ class RFAnalyzer:
                             consistency_score = 0
                         
                         summary[joint] = {
-                            'median_score': representative_score,  # Use this instead
-                            'raw_median_score': median_score,      # Keep original for debugging
+                            'median_score': round(float(representative_score)),  # ✅ Changed from 1 to 0
+                            'raw_median_score': round(float(median_score)),
+                            'typical_angle': round(float(typical_angle)),
+                            'average_score': round(float(average_score)),
+                            'min_score': round(float(min_score)),
+                            'max_score': round(float(max_score)),                            'frames_analyzed': len(scores),
                             'typical_angle': typical_angle,
-                            'average_score': average_score,
-                            'min_score': min_score,
-                            'max_score': max_score,
-                            'frames_analyzed': len(scores),
-                            'typical_angle': typical_angle,
-                            'angle_range': f"{min_angle:.1f}° - {max_angle:.1f}°",
+                            'angle_range': f"{round(min_angle)}° - {round(max_angle)}°",  # ✅ Whole numbers
                             'ideal_range': f"{self.ideal_angles[joint]['min']}° - {self.ideal_angles[joint]['max']}°",
-                            'consistency_score': float(consistency_score)
+                            'consistency_score': round(float(consistency_score))  # ✅ Whole number
                         }
                         
                     except Exception as e:
