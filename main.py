@@ -1985,7 +1985,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             # Clean up resources
             if cap:
                 cap.release()
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             cleanup_temp_enhanced(video_path, thumbnail_path)
             
             # ✅ Create error details as a dict
@@ -2043,7 +2043,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             # Clean up resources before returning error
             if cap:
                 cap.release()
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             
             # Clean up uploaded file
             cleanup_temp_enhanced(video_path, thumbnail_path)
