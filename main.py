@@ -2299,7 +2299,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             logger.error(f"Error releasing video resources: {e}")
             
         # Set heavy objects to None to help garbage collection
-        detector.pose.close() # <-- fix here, close the pose object
+        detector.pose_landmarker.close() # <-- fix here, close the pose object
         detector = None
         analyzer = None
 
@@ -2769,7 +2769,7 @@ async def process_video(
             logger.error(f"Error releasing video resources: {e}")
         
         # Set heavy objects to None to help garbage collection
-        detector.pose.close() # <-- fix here, close the pose object
+        detector.pose_landmarker.close() # <-- fix here, close the pose object
         detector = None
         analyzer = None
 

@@ -1,4 +1,6 @@
 import mediapipe as mp
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision as mp_vision
 import cv2
 import math
 
@@ -10,27 +12,17 @@ class PoseDetector():
         self.smooth = smooth
         self.detectionCon = detectionCon
         self.trackCon = trackCon
-
-        self.mp_pose = mp.solutions.pose
-        self.mp_draw = mp.solutions.drawing_utils
-        self.pose = self.mp_pose.Pose(
-                static_image_mode = self.mode, 
-                model_complexity = 2, 
-                smooth_landmarks = self.smooth, 
-                min_detection_confidence =  self.detectionCon, 
-                min_tracking_confidence =  self.trackCon
-            )
         
-        # Custom drawing specifications for limb colors
-        self.landmark_drawing_spec = self.mp_draw.DrawingSpec(
-            color=(0, 255, 0),  # Green landmarks
-            thickness=2,
-            circle_radius=2
+        base_options = mp_tasks.BaseOptions(model_asset_path='models/pose_landmarker_heavy.task')  # Path to downloaded model
+        options = mp_vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE if not self.mode else mp.tasks.vision.RunningMode.VIDEO,
+            min_pose_detection_confidence=self.detectionCon,
+            min_pose_presence_confidence=self.trackCon,
+            min_tracking_confidence=self.trackCon
         )
-        self.connection_drawing_spec = self.mp_draw.DrawingSpec(
-            color=(255, 0, 255),  # Magenta connections/limbs
-            thickness=2
-        )
+        self.pose_landmarker = mp_vision.PoseLandmarker.create_from_options(options)
+        self.lmList = []
         
         self.prev_right_ankle_y = None
         self.right_ankle_history = []
@@ -38,27 +30,39 @@ class PoseDetector():
         self.direction = None
         self.direction_streak = 0
         
+    # def findPose(self, frame, draw=True):
+    #     # read frame-by-frame
+    #     frameRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #     self.results = self.pose.process(frameRGB)
+    #     if self.results.pose_landmarks:
+    #         if draw:
+    #             self._draw_pose_with_limb_colors(frame)
+    #     return frame
+
     def findPose(self, frame, draw=True):
-        # read frame-by-frame
-        frameRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        self.results = self.pose.process(frameRGB)
-        if self.results.pose_landmarks:
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        results = self.pose_landmarker.detect(mp_image)
+        
+        if results.pose_landmarks:
+            self.lmList = []
+            for lm in results.pose_landmarks[0]:  # Assuming single person; adjust if multi-person
+                h, w, _ = frame.shape
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                self.lmList.append([lm.visibility, cx, cy])  # New format: [visibility, x, y]
+            
             if draw:
                 self._draw_pose_with_limb_colors(frame)
-
+        
         return frame
 
     def _draw_pose_with_limb_colors(self, frame):
-        """Draw pose landmarks with different colors for left and right limbs"""
-        landmarks = self.results.pose_landmarks.landmark
-        h, w, c = frame.shape
+        if not self.lmList:
+            return
         
-        # Convert landmarks to pixel coordinates
+        h, w, c = frame.shape
         points = {}
-        for i, landmark in enumerate(landmarks):
-            x = int(landmark.x * w)
-            y = int(landmark.y * h)
-            points[i] = (x, y)
+        for i, lm in enumerate(self.lmList):
+            points[i] = (lm[1], lm[2])  # lm[1] is x, lm[2] is y
         
         # Define left and right limb connections
         left_connections = [
@@ -105,23 +109,29 @@ class PoseDetector():
         for point in points.values():
             cv2.circle(frame, point, 3, (255, 255, 255), -1)
 
-    # * takes pose landmarks per frame, so use findPose first
+    # # * takes pose landmarks per frame, so use findPose first
+    # def findPosition(self, frame, draw=True):
+    #     self.lmList = []
+    #     if self.results.pose_landmarks:
+    #         for id, lm in enumerate(self.results.pose_landmarks.landmark):
+    #             h, w, c = frame.shape
+    #             cx, cy = int(lm.x * w), int(lm.y * h)
+    #             self.lmList.append([id, cx, cy])
+    #     return self.lmList
+    
     def findPosition(self, frame, draw=True):
-        self.lmList = []
-        if self.results.pose_landmarks:
-            for id, lm in enumerate(self.results.pose_landmarks.landmark):
-                h, w, c = frame.shape
-                cx, cy = int(lm.x * w), int(lm.y * h)
-                self.lmList.append([id, cx, cy])
+        # lmList is already populated in findPose; just return it or add drawing
+        if draw and self.lmList:
+            for lm in self.lmList:
+                cv2.circle(frame, (lm[1], lm[2]), 5, (255, 0, 0), cv2.FILLED)
         return self.lmList
-                        
     
     # * takes lmList per frame to calculate angles per frame
     def findAngle(self, frame, p1, p2, p3, draw=True):
         # Get the landmarks
-        x1, y1 = self.lmList[p1][1:]
-        x2, y2 = self.lmList[p2][1:]
-        x3, y3 = self.lmList[p3][1:]
+        x1, y1 = self.lmList[p1][1], self.lmList[p1][2]  # [1] is x, [2] is y
+        x2, y2 = self.lmList[p2][1], self.lmList[p2][2]
+        x3, y3 = self.lmList[p3][1], self.lmList[p3][2]
         
         # Calculate the Angle
         angle = math.degrees(math.atan2(y3 - y2, x3 - x2) -
@@ -182,9 +192,9 @@ class PoseDetector():
     
     def findKneeAngle(self, frame, p1, p2, p3, draw=True):
         # Get the landmarks
-            x1, y1 = self.lmList[p1][1:]
-            x2, y2 = self.lmList[p2][1:]
-            x3, y3 = self.lmList[p3][1:]
+            x1, y1 = self.lmList[p1][1], self.lmList[p1][2]  # [1] is x, [2] is y
+            x2, y2 = self.lmList[p2][1], self.lmList[p2][2]
+            x3, y3 = self.lmList[p3][1], self.lmList[p3][2]
             # Calculate the Angle
             angle = math.degrees(math.atan2(y3 - y2, x3 - x2) -
                                 math.atan2(y1 - y2, x1 - x2))
@@ -496,52 +506,52 @@ class PoseDetector():
 
         return right_landing
 
-    def findRunPhase(self, frame, curr_lmList, prev_lmList, draw=True):
-        # curr_lmList and prev_lmList are lmList for current and previous frames
+    # def findRunPhase(self, frame, curr_lmList, prev_lmList, draw=True):
+    #     # curr_lmList and prev_lmList are lmList for current and previous frames
 
-        # Ensure both lists have enough landmarks
-        required_indices = [24, 26, 28, 32]
-        if not all(len(curr_lmList) > idx and len(prev_lmList) > idx for idx in required_indices):
-            print("Not enough landmarks detected in one of the frames.")
-            return "Unknown"
+    #     # Ensure both lists have enough landmarks
+    #     required_indices = [24, 26, 28, 32]
+    #     if not all(len(curr_lmList) > idx and len(prev_lmList) > idx for idx in required_indices):
+    #         print("Not enough landmarks detected in one of the frames.")
+    #         return "Unknown"
         
-        # Get relevant landmarks (using Mediapipe's indices)
-        hip = curr_lmList[24]
-        knee = curr_lmList[26]
-        ankle = curr_lmList[28]
-        foot = curr_lmList[32]
-        prev_ankle = prev_lmList[28]
+    #     # Get relevant landmarks (using Mediapipe's indices)
+    #     hip = curr_lmList[24]
+    #     knee = curr_lmList[26]
+    #     ankle = curr_lmList[28]
+    #     foot = curr_lmList[32]
+    #     prev_ankle = prev_lmList[28]
 
-        # Calculate vertical movement of ankle
-        vertical_movement = ankle[2] - prev_ankle[2]  # y increases downward in images
+    #     # Calculate vertical movement of ankle
+    #     vertical_movement = ankle[2] - prev_ankle[2]  # y increases downward in images
 
-        # Is ankle below hip? (foot on ground)
-        ankle_below_hip = ankle[2] > hip[2]
+    #     # Is ankle below hip? (foot on ground)
+    #     ankle_below_hip = ankle[2] > hip[2]
 
-        self.ankle_min_y = getattr(self, 'ankle_min_y', ankle[2])
-        self.ankle_min_y = min(self.ankle_min_y, ankle[2])
-        ankle_off_ground = ankle[2] < self.ankle_min_y + 10  # 30 pixels above lowest point (tune as needed)
+    #     self.ankle_min_y = getattr(self, 'ankle_min_y', ankle[2])
+    #     self.ankle_min_y = min(self.ankle_min_y, ankle[2])
+    #     ankle_off_ground = ankle[2] < self.ankle_min_y + 10  # 30 pixels above lowest point (tune as needed)
 
-        # Is ankle moving up or down?
-        moving_up = vertical_movement < 0
-        moving_down = vertical_movement > 0
+    #     # Is ankle moving up or down?
+    #     moving_up = vertical_movement < 0
+    #     moving_down = vertical_movement > 0
 
-        # Example rule-based phase detection
-        if ankle_below_hip and moving_down:
-            phase = "Stance"
-        elif moving_up and ankle_off_ground:
-            phase = "Swing"
-        elif ankle_below_hip and moving_up:
-            phase = "Toe-off"
-        else:
-            phase = "Unknown"
+    #     # Example rule-based phase detection
+    #     if ankle_below_hip and moving_down:
+    #         phase = "Stance"
+    #     elif moving_up and ankle_off_ground:
+    #         phase = "Swing"
+    #     elif ankle_below_hip and moving_up:
+    #         phase = "Toe-off"
+    #     else:
+    #         phase = "Unknown"
 
-        if draw:
-            cv2.putText(frame, str(phase), (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-            cv2.putText(frame, str((ankle_off_ground)), (70, 250), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+    #     if draw:
+    #         cv2.putText(frame, str(phase), (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+    #         cv2.putText(frame, str((ankle_off_ground)), (70, 250), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
 
-        print(f"Phase: {phase}")
-        return phase
+    #     print(f"Phase: {phase}")
+    #     return phase
 
     # Enhanced foot landing detection methods for PoseModule.py
 
