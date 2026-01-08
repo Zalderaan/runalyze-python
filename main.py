@@ -1985,7 +1985,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             # Clean up resources
             if cap:
                 cap.release()
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             cleanup_temp_enhanced(video_path, thumbnail_path)
             
             # ✅ Create error details as a dict
@@ -2043,7 +2043,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             # Clean up resources before returning error
             if cap:
                 cap.release()
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             
             # Clean up uploaded file
             cleanup_temp_enhanced(video_path, thumbnail_path)
@@ -2143,7 +2143,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             cap.release()
         if out:
             out.release()
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
 
         # Add small delay to ensure file handles are released
         time.sleep(0.1)
@@ -2292,7 +2292,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             if 'out' in locals() and out:
                 out.release()
                 out = None
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             log_memory_usage("AFTER CAP RELEASE")
             immediate_resource_cleanup(cap, out) # Force immediate cleanup of large objects
         except Exception as e:
@@ -2541,7 +2541,7 @@ async def process_video(
             # Clean up resources before returning error
             if cap:
                 cap.release()
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
             
             # Clean up uploaded file
             cleanup_temp_enhanced(video_path, thumbnail_path)
@@ -2637,7 +2637,7 @@ async def process_video(
             cap.release()
         if out:
             out.release()
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
 
         # Add small delay to ensure file handles are released
         time.sleep(0.1)
@@ -2758,7 +2758,7 @@ async def process_video(
             if 'out' in locals() and out:
                 out.release()
                 out = None
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
 
             log_memory_usage("AFTER CAP RELEASE")
             
