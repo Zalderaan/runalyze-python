@@ -202,7 +202,7 @@ class DrillManager:
         return False
 
     async def get_drill_suggestions(self, area: str, performance_level: str, 
-                                  angle: float = None, user_id: str = None) -> List[Dict]:
+                                  angle: float = None, user_id: str = None, user_profile: Dict = None) -> List[Dict]:
         """
         Get customized drill suggestions based on performance area, level, and user data.
         
@@ -264,17 +264,38 @@ class DrillManager:
             #     logger.error("Async task was cancelled")
             #     raise
             
+            # Get runner level once to filter drills
+            runner_level = self._estimate_runner_level(user_profile)
+            bmi_category = self._estimate_bmi_category(user_profile)
+            weight_kg = (user_profile or {}).get("weight_kg") or 0
+
             # Build customized drills
             customized_drills = []
             for i, drill in enumerate(drills):
+                # High-impact drill safety gate:
+                #   1. Obese BMI: always blocked (high joint load risk)
+                #   2. Weight > 110 kg: blocked regardless of BMI/pace
+                #      (ground reaction forces scale with mass, not BMI)
+                #   3. Overweight + beginner pace: blocked
+                #   4. Non-advanced pace: standard block
+                if drill.get("is_high_impact", False):
+                    blocked = (
+                        bmi_category == "obese"
+                        or weight_kg > 110
+                        or (bmi_category == "overweight" and runner_level == "beginner")
+                        or runner_level != "advanced"
+                    )
+                    if blocked:
+                        continue
+
                 customized_drill = self._build_customized_drill(
                     drill, DrillCustomization(), UserProgress(), 
-                    performance_level, area, angle
+                    performance_level, area, angle, user_profile
                 )
                 customized_drills.append(customized_drill)
             
             # Sort drills by priority
-            prioritized_drills = self._prioritize_drills(customized_drills, performance_level, user_id)
+            prioritized_drills = self._prioritize_drills(customized_drills, performance_level, user_id, user_profile)
             
             logger.info(f"Generated {len(prioritized_drills)} customized drills")
             logger.info(f"This is prioritized_drills: {prioritized_drills}")
@@ -294,7 +315,7 @@ class DrillManager:
     
     def _build_customized_drill(self, drill: Dict, customization: DrillCustomization, 
                                progress: UserProgress, performance_level: str, 
-                               area: str, angle: float = None) -> Dict:
+                               area: str, angle: float = None, user_profile: Dict = None) -> Dict:
         """Build a customized drill with all enhancements."""
         customized_drill = drill.copy()
         
@@ -318,7 +339,7 @@ class DrillManager:
         
         # Add performance recommendations
         customized_drill = self._add_performance_recommendations(
-            customized_drill, performance_level, area, angle
+            customized_drill, performance_level, area, angle, user_profile
         )
         
         return customized_drill
@@ -360,7 +381,7 @@ class DrillManager:
             return UserProgress()
 
     def _add_performance_recommendations(self, drill: Dict, performance_level: str, 
-                                        area: str, angle: float = None) -> Dict:
+                                        area: str, angle: float = None, user_profile: Dict = None) -> Dict:
         """
         Add performance-specific recommendations to drills.
         
@@ -369,17 +390,57 @@ class DrillManager:
             performance_level: User's performance level
             area: Analysis area
             angle: Optional current angle measurement
+            user_profile: Optional user profile to estimate pace and BMI
             
         Returns:
             Enhanced drill with performance recommendations
         """
+        runner_level = self._estimate_runner_level(user_profile)
+        bmi_category = self._estimate_bmi_category(user_profile)
+
         # Add performance-based recommendations
         if performance_level in self.PERFORMANCE_RECOMMENDATIONS:
             rec = self.PERFORMANCE_RECOMMENDATIONS[performance_level]
+            
+            # Map pace level to a volume multiplier
+            pace_volume_multipliers = {
+                "advanced": 1.5,
+                "intermediate": 1.0,
+                "beginner": 0.7
+            }
+            pace_multiplier = pace_volume_multipliers.get(runner_level, 1.0)
+
+            # BMI-based volume multiplier:
+            # Higher body mass → more joint load per stride → reduce weekly volume.
+            # BMI is preferred over raw weight because it accounts for height.
+            bmi_volume_multipliers = {
+                "underweight": 0.9,
+                "normal":      1.0,
+                "overweight":  0.85,
+                "obese":       0.70,
+            }
+            bmi_multiplier = bmi_volume_multipliers.get(bmi_category, 1.0)
+            
+            base_freq = rec["frequency_multiplier"]
+            final_freq = round(base_freq * pace_multiplier * bmi_multiplier, 2)
+            
+            volume_notes = {
+                "advanced": "Increased volume recommendation based on your advanced running pace.",
+                "intermediate": "Standard volume recommendation for your pace.",
+                "beginner": "Reduced volume to build foundational strength safely based on your pace."
+            }
+
+            bmi_volume_notes = {
+                "overweight": " Volume reduced by 15% to protect joints from higher load per stride.",
+                "obese":      " Volume reduced by 30% — prioritise low-impact form work first.",
+                "underweight": " Slightly reduced volume; ensure adequate fuelling before sessions.",
+            }
+
             drill["performance_recommendation"] = {
-                "frequency_adjustment": rec["frequency_multiplier"],
+                "frequency_adjustment": final_freq,
                 "focus_area": rec["focus"],
-                "priority_level": rec["priority"]
+                "priority_level": rec["priority"],
+                "pace_based_volume_note": volume_notes.get(runner_level, volume_notes["intermediate"]) + bmi_volume_notes.get(bmi_category, "")
             }
         
         # Add area-specific focus notes
@@ -388,10 +449,76 @@ class DrillManager:
         
         return drill
 
-    def _prioritize_drills(self, drills: List[Dict], performance_level: str, 
-                          user_id: str = None) -> List[Dict]:
+    def _estimate_runner_level(self, user_profile: Dict) -> str:
         """
-        Sort drills by priority based on performance level and user progress.
+        Estimate runner level based on pace (seconds per km).
+        If multiple times exist, use the most standard one (5k, then 10k, then 3k).
+        Paces:
+        - Elite/Advanced: < 5:00/km (300s/km) 
+        - Intermediate: 5:00 - 6:30/km (300s - 390s/km)
+        - Beginner: > 6:30/km (390s/km)
+        """
+        if not user_profile:
+            return "intermediate" # Default
+            
+        pace_per_km = None
+        if user_profile.get("time_5k"):
+            pace_per_km = user_profile["time_5k"] / 5.0
+        elif user_profile.get("time_10k"):
+            pace_per_km = user_profile["time_10k"] / 10.0
+        elif user_profile.get("time_3k"):
+            pace_per_km = user_profile["time_3k"] / 3.0
+            
+        if not pace_per_km:
+            return "intermediate"
+            
+        if pace_per_km < 300: # Faster than 5:00/km
+            return "advanced"
+        elif pace_per_km <= 390: # 5:00/km to 6:30/km
+            return "intermediate"
+        else: # Slower than 6:30/km
+            return "beginner"
+
+    def _estimate_bmi_category(self, user_profile: Dict) -> str:
+        """
+        Classify the runner's BMI category.
+
+        BMI is preferred over raw weight for running injury risk because it
+        normalises mass relative to height. A 100 kg runner at 190 cm (BMI 27.7)
+        has a very different risk profile to a 100 kg runner at 165 cm (BMI 36.7).
+
+        Categories (WHO standard):
+          underweight  < 18.5
+          normal       18.5 – 24.9
+          overweight   25.0 – 29.9
+          obese        >= 30
+
+        A separate weight hard-cap of >110 kg is enforced in get_drill_suggestions()
+        for high-impact drills, since ground reaction forces scale with mass.
+        """
+        if not user_profile:
+            return "normal"  # Safe default
+
+        height_cm = user_profile.get("height_cm")
+        weight_kg = user_profile.get("weight_kg")
+
+        if not height_cm or not weight_kg or height_cm <= 0:
+            return "normal"
+
+        bmi = weight_kg / ((height_cm / 100) ** 2)
+        if bmi < 18.5:
+            return "underweight"
+        elif bmi < 25:
+            return "normal"
+        elif bmi < 30:
+            return "overweight"
+        else:
+            return "obese"
+
+    def _prioritize_drills(self, drills: List[Dict], performance_level: str, 
+                          user_id: str = None, user_profile: Dict = None) -> List[Dict]:
+        """
+        Sort drills by priority based on performance level, user progress, and pace.
         
         Args:
             drills: List of drill dictionaries
@@ -401,16 +528,30 @@ class DrillManager:
         Returns:
             Sorted list of drills by priority (highest first)
         """
+        runner_level = self._estimate_runner_level(user_profile)
+
         def calculate_drill_priority(drill: Dict) -> float:
             """Calculate priority score for a single drill."""
             score = 0.0
             
             # Base priority by difficulty level
             difficulty = drill.get("difficulty_level", 1)
+            
+            # Core prioritization logic based on form score and runner pace
             if performance_level == PerformanceLevel.POOR.value:
-                score += (6 - difficulty) * 2  # Prefer easier drills for poor performance
+                # Poor form: always prefer foundational drills regardless of pace
+                score += (6 - difficulty) * 2 
             else:
-                score += difficulty  # Prefer challenging drills for better performance
+                # Better form: tailor drill complexity to their running experience/pace
+                if runner_level == "advanced":
+                    # Advanced runners handle complex drills well
+                    score += difficulty * 1.5 
+                elif runner_level == "beginner":
+                    # Beginners need foundational mechanics even if form is okay
+                    score += (6 - difficulty) * 1.5
+                else: 
+                    # Intermediate
+                    score += difficulty 
             
             # User progress bonus
             user_progress = drill.get("user_progress", {})
@@ -470,6 +611,7 @@ class DrillManager:
             "performance_recommendation": drill.get("performance_recommendation", {}),
             "user_progress": drill.get("user_progress", {}),
             "safety_note": drill.get("safety_note"),
+            "is_high_impact": drill.get("is_high_impact", False),
             "angle_specific": drill.get("angle_specific", False),
             "reps": drill.get("reps"),
             "sets": drill.get("sets"),

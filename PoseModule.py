@@ -733,8 +733,16 @@ class PoseDetector():
             right_foot_flat = abs(right_heel_y - right_toe_y) < 20
             
             # Additional criteria: foot is at lowest position relative to recent history
-            left_contact = left_foot_flat and self._is_foot_grounded(left_ankle_y, 'left')
-            right_contact = right_foot_flat and self._is_foot_grounded(right_ankle_y, 'right')
+            # changed
+            left_grounded, left_ground_y, left_hist_len = self._is_foot_grounded(
+                left_ankle_y, 'left', return_debug=True
+            )
+            right_grounded, right_ground_y, right_hist_len = self._is_foot_grounded(
+                right_ankle_y, 'right', return_debug=True
+            )
+
+            left_contact = left_foot_flat and left_grounded
+            right_contact = right_foot_flat and right_grounded
             
             # Detect new landings (transition from airborne to contact)
             left_landing = left_contact and self.contact_tracking['left_was_airborne']
@@ -744,60 +752,152 @@ class PoseDetector():
             self.contact_tracking['left_was_airborne'] = not left_contact
             self.contact_tracking['right_was_airborne'] = not right_contact
             
-            if draw:
-                self._draw_contact_info(frame, left_contact, right_contact, left_landing, right_landing)
-        
+        if draw:
+            debug_data = {
+                'left_ankle_y': left_ankle_y,
+                'right_ankle_y': right_ankle_y,
+                'left_heel_y': left_heel_y,
+                'right_heel_y': right_heel_y,
+                'left_toe_y': left_toe_y,
+                'right_toe_y': right_toe_y,
+                'left_flatness': abs(left_heel_y - left_toe_y),
+                'right_flatness': abs(right_heel_y - right_toe_y),
+                'left_foot_flat': left_foot_flat,
+                'right_foot_flat': right_foot_flat,
+                'left_grounded': left_grounded,
+                'right_grounded': right_grounded,
+                'left_ground_y': left_ground_y,
+                'right_ground_y': right_ground_y,
+                'left_hist_len': left_hist_len,
+                'right_hist_len': right_hist_len,
+                'left_was_airborne': self.contact_tracking['left_was_airborne'],
+                'right_was_airborne': self.contact_tracking['right_was_airborne'],
+                'flatness_threshold': 20
+            }
+            self._draw_contact_info(
+                frame, left_contact, right_contact, left_landing, right_landing, debug_data
+            )        
+            
         return {
             'left_contact': left_contact,
             'right_contact': right_contact,
             'left_landing': left_landing,
             'right_landing': right_landing
         }
-
-    def _is_foot_grounded(self, ankle_y, foot_side):
-        """Check if foot is in ground contact position"""
-        history_key = f'{foot_side}_ground_history'
         
+    # changed
+    def _is_foot_grounded(self, ankle_y, foot_side, return_debug=False):
+        """Check if foot is in ground contact position."""
+        history_key = f'{foot_side}_ground_history'
+
         if not hasattr(self, 'ground_tracking'):
             self.ground_tracking = {'left_ground_history': [], 'right_ground_history': []}
-        
+
         # Add current position
         self.ground_tracking[history_key].append(ankle_y)
-        
+
         # Keep last 15 frames
         if len(self.ground_tracking[history_key]) > 15:
             self.ground_tracking[history_key].pop(0)
-        
-        if len(self.ground_tracking[history_key]) < 5:
-            return False
-        
-        # Check if current position is among the lowest 30% of recent positions
-        recent_positions = sorted(self.ground_tracking[history_key])
-        threshold_index = int(len(recent_positions) * 0.3)
-        return ankle_y >= recent_positions[-threshold_index-1]  # Among the lowest positions
 
-    def _draw_contact_info(self, frame, left_contact, right_contact, left_landing, right_landing):
+        history = self.ground_tracking[history_key]
+        history_len = len(history)
+
+        # Not enough samples yet
+        if history_len < 5:
+            if return_debug:
+                return False, None, history_len
+            return False
+
+        # Threshold for "grounded": among lowest 30% of recent ankle y values
+        recent_positions = sorted(history)
+        threshold_index = int(history_len * 0.3)
+        threshold_y = recent_positions[-threshold_index - 1]
+        is_grounded = ankle_y >= threshold_y
+
+        if return_debug:
+            return is_grounded, threshold_y, history_len
+        return is_grounded
+    
+    def _draw_contact_info(self, frame, left_contact, right_contact, left_landing, right_landing, debug_data=None):        
         """Draw contact detection information"""
         h, w = frame.shape[:2]
         scale = min(w, h) / 1000
         font_scale = 0.7 * scale
         font_thickness = max(1, int(1 * scale))
-        
-        # Contact status
+
+        # Existing contact status text
         left_text = f"Left: {'CONTACT' if left_contact else 'AIRBORNE'}"
         right_text = f"Right: {'CONTACT' if right_contact else 'AIRBORNE'}"
-        
-        cv2.putText(frame, left_text, (50, 450), 
-                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+
+        cv2.putText(frame, left_text, (50, 450),
+                    cv2.FONT_HERSHEY_PLAIN, font_scale,
                     (0, 255, 0) if left_contact else (255, 0, 0), font_thickness)
-        cv2.putText(frame, right_text, (50, 500), 
-                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
+        cv2.putText(frame, right_text, (50, 500),
+                    cv2.FONT_HERSHEY_PLAIN, font_scale,
                     (0, 255, 0) if right_contact else (255, 0, 0), font_thickness)
-        
-        # Landing alerts
+
         if left_landing:
-            cv2.putText(frame, "LEFT FOOT LANDING!", (240, 450), 
+            cv2.putText(frame, "LEFT FOOT LANDING!", (240, 450),
                         cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
         if right_landing:
-            cv2.putText(frame, "RIGHT FOOT LANDING!", (240, 500), 
+            cv2.putText(frame, "RIGHT FOOT LANDING!", (240, 500),
                         cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
+
+        if not debug_data:
+            return
+
+        # 1) Draw ground threshold lines (if available)
+        lg = debug_data.get('left_ground_y')
+        rg = debug_data.get('right_ground_y')
+        if lg is not None:
+            cv2.line(frame, (0, int(lg)), (w, int(lg)), (0, 255, 255), 1)  # yellow
+            cv2.putText(frame, f"L ground y={int(lg)}", (10, max(20, int(lg)-10)),
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 255, 255), font_thickness)
+        if rg is not None:
+            cv2.line(frame, (0, int(rg)), (w, int(rg)), (255, 255, 0), 1)  # cyan
+            cv2.putText(frame, f"R ground y={int(rg)}", (10, max(40, int(rg)-10)),
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (255, 255, 0), font_thickness)
+
+        # 2) Landmark markers: heel/toe/ankle
+        pts = [
+            ('L ankle', 27, debug_data.get('left_ankle_y'), (0, 255, 255)),
+            ('L heel', 29, debug_data.get('left_heel_y'), (0, 255, 0)),
+            ('L toe', 31, debug_data.get('left_toe_y'), (0, 200, 0)),
+            ('R ankle', 28, debug_data.get('right_ankle_y'), (255, 255, 0)),
+            ('R heel', 30, debug_data.get('right_heel_y'), (0, 0, 255)),
+            ('R toe', 32, debug_data.get('right_toe_y'), (0, 0, 200)),
+        ]
+        for label, idx, yv, color in pts:
+            if len(self.lmList) > idx and yv is not None:
+                x = int(self.lmList[idx][1])
+                y = int(yv)
+                cv2.circle(frame, (x, y), 4, color, -1)
+                cv2.putText(frame, label, (x + 5, y - 5),
+                            cv2.FONT_HERSHEY_PLAIN, 0.6 * scale, color, 1)
+
+        # 3) Flatness segments (heel-to-toe)
+        if len(self.lmList) > 31:
+            lx1, ly1 = int(self.lmList[29][1]), int(self.lmList[29][2])
+            lx2, ly2 = int(self.lmList[31][1]), int(self.lmList[31][2])
+            lc = (0, 255, 0) if debug_data.get('left_foot_flat') else (0, 0, 255)
+            cv2.line(frame, (lx1, ly1), (lx2, ly2), lc, 2)
+
+        if len(self.lmList) > 32:
+            rx1, ry1 = int(self.lmList[30][1]), int(self.lmList[30][2])
+            rx2, ry2 = int(self.lmList[32][1]), int(self.lmList[32][2])
+            rc = (0, 255, 0) if debug_data.get('right_foot_flat') else (0, 0, 255)
+            cv2.line(frame, (rx1, ry1), (rx2, ry2), rc, 2)
+
+        # 4) State panel
+        panel_y = 20
+        rows = [
+            f"L flat={debug_data.get('left_flatness', 0):.1f}/{debug_data.get('flatness_threshold', 20)} "
+            f"grounded={debug_data.get('left_grounded')} hist={debug_data.get('left_hist_len', 0)}/5",
+            f"R flat={debug_data.get('right_flatness', 0):.1f}/{debug_data.get('flatness_threshold', 20)} "
+            f"grounded={debug_data.get('right_grounded')} hist={debug_data.get('right_hist_len', 0)}/5",
+            f"L was_airborne={debug_data.get('left_was_airborne')}  R was_airborne={debug_data.get('right_was_airborne')}",
+        ]
+        for i, txt in enumerate(rows):
+            cv2.putText(frame, txt, (10, panel_y + i * 20),
+                        cv2.FONT_HERSHEY_PLAIN, font_scale, (255, 255, 255), font_thickness)
