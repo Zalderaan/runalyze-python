@@ -165,6 +165,7 @@ async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, dril
             "strengths": [],
             "priority_areas": [],
             "detailed_feedback": {},
+            "bmi_category": "normal",  # populated after user_profile fetch
         }
 
         # Extract typical angles and scores
@@ -189,6 +190,24 @@ async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, dril
             feedback["overall_assessment"] = "Your running form shows potential but would benefit from further enhancements."
         else:
             feedback["overall_assessment"] = "Significant improvements needed in multiple areas of your running form."
+
+        # Fetch user profile once to use for paced-adjusted drill suggestions
+        user_profile = {}
+        if user_id:
+            try:
+                user_response = drill_manager.supabase.table("users").select("height_cm, weight_kg, time_3k, time_5k, time_10k").eq("id", user_id).limit(1).execute()
+                if user_response and user_response.data:
+                    user_profile = user_response.data[0]
+            except Exception as e:
+                logger.error(f"Error fetching user profile for feedback generation: {e}")
+
+        # Compute BMI category once for use across assessment and drills
+        bmi_category = drill_manager._estimate_bmi_category(user_profile)
+        bmi_context_notes = {
+            "underweight": " As a runner in the underweight range, ensure adequate fuelling and recovery — bone stress injury risk is elevated.",
+            "overweight":  " As a runner in the overweight BMI range, prioritise joint-friendly drills and build mileage gradually to manage load.",
+            "obese":       " Given your current BMI, focus on low-impact form drills first — protecting your joints from excessive load is the top priority.",
+        }
 
         # Process each area
         for area, score in scores.items():
@@ -216,7 +235,7 @@ async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, dril
                 })
             
             # Get drills from database
-            drills = await drill_manager.get_drill_suggestions(area, performance_level, angle, user_id)
+            drills = await drill_manager.get_drill_suggestions(area, performance_level, angle, user_id, user_profile)
             
             # Format drills for frontend
             formatted_drills = [drill_manager.format_drill_for_frontend(drill) for drill in drills]
@@ -232,6 +251,11 @@ async def generate_feedback(analysis_summary: Dict[str, Any], user_id: str, dril
                 "classification": analysis_result["classification"]
             }
         
+        # Append BMI context note to overall assessment and store bmi_category
+        feedback["bmi_category"] = bmi_category
+        if bmi_category in bmi_context_notes:
+            feedback["overall_assessment"] += bmi_context_notes[bmi_category]
+
         logger.info(f"Generated feedback for user {user_id} with overall score {overall_score}")
         return feedback
         
