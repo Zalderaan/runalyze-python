@@ -1217,9 +1217,12 @@ def process_frame_with_scaling(frame, detector, processing_width, processing_hei
             foot_strike = detector.findFootAngle(processing_frame, draw=True)
 
             # Check for valid measurements
-            if all(angle is not None for angle in [head_position, back_position, arm_flexion, left_knee, right_knee, foot_strike]):
-                analysis_data = [head_position, back_position,
-                                 arm_flexion, left_knee, right_knee, foot_strike]
+            angles = [head_position, back_position, arm_flexion, left_knee, right_knee, foot_strike]
+            if all(angle is not None for angle in angles):
+                analysis_data = angles
+            else:
+                # Flag partial detection as out_of_frame
+                analysis_data = "out_of_frame"
 
         # Scale back to original size for output
         if scale_factor != 1.0:
@@ -1311,17 +1314,10 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                     )
 
                     # ✅ CRITICAL: Add tiny delay to ensure SSE sees the update
-                    # This allows the event loop to process the update before continuing
-                    # 10ms delay - allows SSE to catch up
                     await asyncio.sleep(0.01)
                 try:
                     # Log memory before frame processing
-                    log_frame_memory(
-                        current_frame_num,
-                        total_frames,
-                        "frame_start",
-                        {"batch_size": len(batch_frames), "batch_position": i}
-                    )
+                    log_frame_memory(current_frame_num, total_frames, "frame_start")
 
                     # Process frame with memory optimization and rotation
                     output_frame, lmList, analysis_data = process_frame_with_scaling(
@@ -1329,18 +1325,9 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                         original_width, original_height, scale_factor, rotation
                     )
 
-                    # Log memory after pose detection
-                    log_frame_memory(
-                        current_frame_num,
-                        total_frames,
-                        "pose_detection",
-                        {"landmarks_detected": len(
-                            lmList) > 0, "landmarks_count": len(lmList)}
-                    )
-
                     # Analyze frame if valid data
                     if analysis_data:
-                        # Check for foot contact (simplified for now)
+                        # Check for foot contact
                         if hasattr(detector, 'detectFootContact_Alternative'):
                             contact_results = detector.detectFootContact_Alternative(
                                 output_frame, draw=True)
@@ -1349,17 +1336,13 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                                 "right_landing": current_frame_num % 2 == 0}
 
                         if contact_results and contact_results.get('right_landing', False):
+                            # Check if user went out of frame during a landing (critical moment)
+                            if analysis_data == "out_of_frame":
+                                logger.error(f"User out of frame at critical landing: frame {current_frame_num}")
+                                raise ValueError("detected user went out of frame")
+                                
                             analyzer.analyze_frame(analysis_data)
                             processed_count += 1
-
-                            # Log memory after analysis
-                            log_frame_memory(
-                                current_frame_num,
-                                total_frames,
-                                "analysis_complete",
-                                {"contact_detected": True,
-                                    "processed_count": processed_count}
-                            )
 
                     # Add frame number overlay for debugging
                     if not lmList:
@@ -1369,32 +1352,21 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                     # Write to output immediately
                     out.write(output_frame)
 
-                    # Log memory after writing
-                    log_frame_memory(
-                        current_frame_num,
-                        total_frames,
-                        "frame_written",
-                        {"video_writing": True}
-                    )
-
                     # Immediate cleanup
                     del output_frame
                     del frame
 
+                except ValueError as ve:
+                    # Re-raise explicit "out of frame" error to stop processing
+                    if str(ve) == "detected user went out of frame":
+                        raise ve
+                    
                 except Exception as e:
-                    logger.error(
-                        f"Error processing frame {current_frame_num}: {e}")
+                    logger.error(f"Error processing frame {current_frame_num}: {e}")
                     out.write(frame)
                     del frame
 
-                    log_frame_memory(
-                        current_frame_num,
-                        total_frames,
-                        "frame_error",
-                        {"error": str(e)}
-                    )
-
-            # ✅ UPDATE PROGRESS AFTER EACH BATCH (keep this too)
+            # ✅ UPDATE PROGRESS AFTER EACH BATCH
             if tracker:
                 progress = 20 + (frame_count / total_frames) * 65
                 tracker.update(
@@ -1404,37 +1376,18 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                     frame_count,
                     total_frames
                 )
-                # Allow SSE to catch the batch update
                 await asyncio.sleep(0.01)
 
             # Clear batch from memory
             del batch_frames
             gc.collect()
-            log_memory_usage("AFTER_BATCH_CLEANUP")
 
-            # Log memory after batch cleanup
-            if frame_count > 0:
-                log_frame_memory(
-                    frame_count,
-                    total_frames,
-                    "batch_cleanup",
-                    {"batch_completed": True, "gc_triggered": True}
-                )
-
-            # Progress logging
-            if frame_count % 50 == 0:
-                elapsed_time = (datetime.now() - start_time).total_seconds()
-                fps_processing = frame_count / elapsed_time if elapsed_time > 0 else 0
-                percent_complete = (frame_count / total_frames) * \
-                    100 if total_frames > 0 else 0
-                estimated_remaining = (
-                    (total_frames - frame_count) / fps_processing) if fps_processing > 0 else 0
-
-                progress_info = f"Frame {frame_count}/{total_frames} ({percent_complete:.1f}%), {fps_processing:.1f}fps, ETA: {estimated_remaining:.1f}s"
-                print(f"OPTIMIZED PROCESSING: {progress_info}")
-                log_memory_usage(
-                    f"STREAMING_BATCH_{frame_count//batch_size}", progress_info)
-
+    except ValueError as ve:
+        if str(ve) == "detected user went out of frame":
+            logger.error("Stopping process: User went out of frame")
+            raise ve
+        else:
+            logger.error(f"ValueError in streaming processing: {ve}")
     except Exception as e:
         logger.error(f"Error in streaming processing: {e}")
 
@@ -1476,7 +1429,7 @@ class StorageManager:
         self.supabase = supabase_client
         self.bucket_name = bucket_name
 
-    def upload_thumbnail(self, uid: str, thumbnail_path: str, video_uuid: str) -> Optional[str]:
+    def upload_thumbnail(self, username_or_id: str, thumbnail_path: str, video_uuid: str) -> Optional[str]:
         """Upload thumbnail image to Supabase storage."""
         try:
             # Ensure the file exists before uploading
@@ -1485,7 +1438,8 @@ class StorageManager:
                     f"Thumbnail file does not exist: {thumbnail_path}")
                 return None
 
-            unique_filename = f"annotated-footage/{uid}/{video_uuid}/thumbnail.jpg"
+            # Path format: annotated-footage/{username}/{video_uuid}/thumbnail.jpg
+            unique_filename = f"annotated-footage/{username_or_id}/{video_uuid}/thumbnail.jpg"
             logger.info(
                 f"Uploading thumbnail: {thumbnail_path} -> {unique_filename}")
 
@@ -1516,7 +1470,7 @@ class StorageManager:
             logger.error(f"Error uploading thumbnail: {e}")
             return None
 
-    def upload_video(self, uid: str, file_path: str, file_name: str, video_uuid: str) -> Tuple[Optional[str], Optional[str]]:
+    def upload_video(self, username_or_id: str, file_path: str, file_name: str, video_uuid: str) -> Tuple[Optional[str], Optional[str]]:
         """Upload processed video to Supabase storage."""
         try:
             # Ensure the file exists before uploading
@@ -1524,8 +1478,9 @@ class StorageManager:
                 logger.error(f"Video file does not exist: {file_path}")
                 return None, None
 
-            folder = "annotated-footage"
-            unique_filename = f"{folder}/{uid}/{video_uuid}_{file_name}"
+            # Path format: annotated-footage/{username}/{video_uuid}/{file_name}
+            folder = f"annotated-footage/{username_or_id}/{video_uuid}"
+            unique_filename = f"{folder}/{file_name}"
             logger.info(f"Uploading video: {file_path} -> {unique_filename}")
 
             with open(file_path, 'rb') as file:
@@ -1583,14 +1538,26 @@ class DatabaseManager:
         try:
 
             # 1. Insert analysis results
+            # Check for missing values - user must always be in frame
+            required_joints = ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
+            for joint in required_joints:
+                val = analysis_summary.get(joint, {}).get("median_score")
+                if val is None:
+                    logger.error(f"Validation failed: {joint} is missing in analysis results")
+                    return {
+                        "success": False,
+                        "error": "error: detected user went out of frame",
+                        "data": analysis_summary
+                    }
+
             results_data = {
                 "user_id": user_id,
-                "head_position": analysis_summary.get("head_position", {}).get("median_score", 0),
-                "back_position": analysis_summary.get("back_position", {}).get("median_score", 0),
-                "arm_flexion": analysis_summary.get("arm_flexion", {}).get("median_score", 0),
-                "right_knee": analysis_summary.get("right_knee", {}).get("median_score", 0),
-                "left_knee": analysis_summary.get("left_knee", {}).get("median_score", 0),
-                "foot_strike": analysis_summary.get("foot_strike", {}).get("median_score", 0),
+                "head_position": analysis_summary.get("head_position", {}).get("median_score"),
+                "back_position": analysis_summary.get("back_position", {}).get("median_score"),
+                "arm_flexion": analysis_summary.get("arm_flexion", {}).get("median_score"),
+                "right_knee": analysis_summary.get("right_knee", {}).get("median_score"),
+                "left_knee": analysis_summary.get("left_knee", {}).get("median_score"),
+                "foot_strike": analysis_summary.get("foot_strike", {}).get("median_score"),
                 "overall_score": analysis_summary.get("overall_score", 0),
             }
 
@@ -1602,14 +1569,14 @@ class DatabaseManager:
                         f"Failed to create analysis results: {results_response.error}")
 
                 analysis_id = results_response.data[0]["id"]
+                inserted_analysis_id = analysis_id
                 logger.info(f"Analysis results created: {analysis_id}")
 
             except Exception as e:
                 logger.error(f"Analysis results error: {str(e)}")
-                # Rollback both records
+                # Rollback only records that were actually inserted before this failure
                 self._rollback_feedback(inserted_feedback_id)
                 self._rollback_video(inserted_video_id)
-                self._rollback_analysis(analysis_id)
                 return {
                     "success": False,
                     "error": f"Analysis results error: {str(e)}",
@@ -2005,11 +1972,14 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
 
     # Fetch user profile early so RFAnalyzer can apply height-adjusted tolerances
     analyzer_user_profile = {}
+    username_for_storage = user_id  # Fallback to user_id if username not found
     try:
-        profile_resp = supabase.table("users").select("height_cm, weight_kg").eq("id", user_id).limit(1).execute()
+        profile_resp = supabase.table("users").select("height_cm, weight_kg, username").eq("id", user_id).limit(1).execute()
         if profile_resp and profile_resp.data:
             analyzer_user_profile = profile_resp.data[0]
-            logger.info(f"Loaded user profile for analyzer: height={analyzer_user_profile.get('height_cm')}cm, weight={analyzer_user_profile.get('weight_kg')}kg")
+            if analyzer_user_profile.get("username"):
+                username_for_storage = analyzer_user_profile.get("username")
+            logger.info(f"Loaded user profile for analyzer: height={analyzer_user_profile.get('height_cm')}cm, weight={analyzer_user_profile.get('weight_kg')}kg, username={username_for_storage}")
     except Exception as e:
         logger.warning(f"Could not fetch user profile for analyzer (using defaults): {e}")
 
@@ -2062,7 +2032,7 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             print("=== STAGE 3: UPLOADING THUMBNAIL ===")
             log_memory_usage("BEFORE_THUMBNAIL_UPLOAD")
             thumbnail_url = storage_manager.upload_thumbnail(
-                user_id, thumbnail_path, video_uuid)
+                username_for_storage, thumbnail_path, video_uuid)
             log_memory_usage("AFTER_THUMBNAIL_UPLOAD")
 
         # === STAGE 4: VIDEO ORIENTATION DETECTION ===
@@ -2379,6 +2349,11 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             user_id, download_url, thumbnail_url, analysis_summary, feedback,
             video_metadata=video_metadata
         )
+
+        if not analysis_result.get("success", False):
+            error_msg = analysis_result.get("error", "Failed to save analysis results")
+            logger.error(f"Database validation error: {error_msg}")
+            raise ValueError(error_msg)
 
         log_memory_usage("AFTER_DATABASE_OPERATIONS")
 

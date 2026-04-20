@@ -191,67 +191,70 @@ class PoseDetector():
         return angle
     
     def findKneeAngle(self, frame, p1, p2, p3, draw=True):
+        # Guard: return None if any required landmark is missing
+        if not self.lmList or len(self.lmList) <= max(p1, p2, p3):
+            return None
+
         # Get the landmarks
-            x1, y1 = self.lmList[p1][1], self.lmList[p1][2]  # [1] is x, [2] is y
-            x2, y2 = self.lmList[p2][1], self.lmList[p2][2]
-            x3, y3 = self.lmList[p3][1], self.lmList[p3][2]
-            # Calculate the Angle
-            angle = math.degrees(math.atan2(y3 - y2, x3 - x2) -
-                                math.atan2(y1 - y2, x1 - x2))
-            if angle < 0:
-                angle += 360
+        x1, y1 = self.lmList[p1][1], self.lmList[p1][2]  # [1] is x, [2] is y
+        x2, y2 = self.lmList[p2][1], self.lmList[p2][2]
+        x3, y3 = self.lmList[p3][1], self.lmList[p3][2]
+        # Calculate the Angle
+        angle = math.degrees(math.atan2(y3 - y2, x3 - x2) -
+                            math.atan2(y1 - y2, x1 - x2))
+        if angle < 0:
+            angle += 360
 
-            knee_angle = 360 - angle
-            # print(angle)
+        knee_angle = 360 - angle
 
-            h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
-            scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
+        h, w = frame.shape[:2]  # [:2] gets height and width (ignores channels if color image)
+        scale = min(w, h) / 1000  # Changed from 480 to 1000 for finer scaling
 
-            # Draw angle
-            if draw:
-                # Adjusted scaling factors
-                thickness = max(1, int(1 * scale))  # Thinner lines
-                radius = max(3, int(4 * scale))     # Smaller inner circles
-                radius_outer = max(5, int(6 * scale)) # Slightly larger outer circles
-                font_scale = 0.8 * scale             # Smaller font
-                font_thickness = max(1, int(1 * scale)) # Thinner font
+        # Draw angle
+        if draw:
+            # Adjusted scaling factors
+            thickness = max(1, int(1 * scale))  # Thinner lines
+            radius = max(3, int(4 * scale))     # Smaller inner circles
+            radius_outer = max(5, int(6 * scale)) # Slightly larger outer circles
+            font_scale = 0.8 * scale             # Smaller font
+            font_thickness = max(1, int(1 * scale)) # Thinner font
 
-                # Draw lines with limb-specific colors
-                # Determine color based on which knee is being measured
-                if p1 in [23, 25, 27]:  # Left leg landmarks
-                    line_color = (255, 0, 0)  # Blue for left leg
-                elif p1 in [24, 26, 28]:  # Right leg landmarks
-                    line_color = (0, 0, 255)  # Red for right leg
-                else:
-                    line_color = (0, 255, 0)  # Green for center/other
+            # Draw lines with limb-specific colors
+            # Determine color based on which knee is being measured
+            if p1 in [23, 25, 27]:  # Left leg landmarks
+                line_color = (255, 0, 0)  # Blue for left leg
+            elif p1 in [24, 26, 28]:  # Right leg landmarks
+                line_color = (0, 0, 255)  # Red for right leg
+            else:
+                line_color = (0, 255, 0)  # Green for center/other
 
-                cv2.line(frame, (x1, y1), (x2, y2), line_color, thickness)
-                cv2.line(frame, (x3, y3), (x2, y2), line_color, thickness)
-                cv2.circle(frame, (x1, y1), radius, (0, 0, 255), cv2.FILLED)
-                cv2.circle(frame, (x1, y1), radius_outer, (0, 0, 255), thickness)
-                cv2.circle(frame, (x2, y2), radius, (0, 0, 255), cv2.FILLED)
-                cv2.circle(frame, (x2, y2), radius_outer, (0, 0, 255), thickness)
-                cv2.circle(frame, (x3, y3), radius, (0, 0, 255), cv2.FILLED)
-                cv2.circle(frame, (x3, y3), radius_outer, (0, 0, 255), thickness)
+            cv2.line(frame, (x1, y1), (x2, y2), line_color, thickness)
+            cv2.line(frame, (x3, y3), (x2, y2), line_color, thickness)
+            cv2.circle(frame, (x1, y1), radius, (0, 0, 255), cv2.FILLED)
+            cv2.circle(frame, (x1, y1), radius_outer, (0, 0, 255), thickness)
+            cv2.circle(frame, (x2, y2), radius, (0, 0, 255), cv2.FILLED)
+            cv2.circle(frame, (x2, y2), radius_outer, (0, 0, 255), thickness)
+            cv2.circle(frame, (x3, y3), radius, (0, 0, 255), cv2.FILLED)
+            cv2.circle(frame, (x3, y3), radius_outer, (0, 0, 255), thickness)
 
-                text = str(int(knee_angle))
-                (text_width, text_height), baseline = cv2.getTextSize(
-                    text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
-                
-                # Position text near point p2
-                text_x = x2 - int(20 * scale)
-                text_y = y2 + int(20 * scale)
-                
-                cv2.rectangle(frame, 
-                        (text_x - 2, text_y - text_height - 2),
-                        (text_x + text_width + 2, text_y + 2),
-                        (255, 255, 255), cv2.FILLED)
+            text = str(int(knee_angle))
+            (text_width, text_height), baseline = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_PLAIN, font_scale, font_thickness)
             
-                cv2.putText(frame, text, (text_x, text_y),
-                    cv2.FONT_HERSHEY_PLAIN, font_scale, 
-                    (0, 0, 255), font_thickness)
+            # Position text near point p2
+            text_x = x2 - int(20 * scale)
+            text_y = y2 + int(20 * scale)
             
-                return knee_angle
+            cv2.rectangle(frame, 
+                    (text_x - 2, text_y - text_height - 2),
+                    (text_x + text_width + 2, text_y + 2),
+                    (255, 255, 255), cv2.FILLED)
+        
+            cv2.putText(frame, text, (text_x, text_y),
+                cv2.FONT_HERSHEY_PLAIN, font_scale, 
+                (0, 0, 255), font_thickness)
+        
+        return knee_angle
 
     # def findHeadPosition(self, frame, left_eye_id = 2, right_eye_id = 5, left_ear_id = 7, right_ear_id = 8, draw=True):
     #     # print("findHeadPosition called!")
