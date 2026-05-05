@@ -123,7 +123,7 @@ class DrillManager:
             return self._cache[cache_key]
         
         try:
-            query = self.supabase.table("drills").select("*")
+            query = self.supabase.table("drills").select("*, drill_templates(*)")
             
             # Apply filters
             if area and self._is_valid_area(area):
@@ -593,16 +593,26 @@ class DrillManager:
         Returns:
             Formatted drill dictionary optimized for frontend rendering
         """
+        # Supabase may return joined tables as a single dict or a list containing one dict
+        tpl_raw = drill.get("drill_templates")
+        tpl = tpl_raw[0] if isinstance(tpl_raw, list) and len(tpl_raw) > 0 else (tpl_raw or {})
+        
+        # Helper to get value from tpl or drill, handling both None and empty strings
+        def get_val(key, tpl_key=None):
+            tk = tpl_key or key
+            return tpl.get(tk) or drill.get(key)
+
         return {
             "id": drill.get("id"),
-            "drill_name": drill.get("drill_name", "Unknown Drill"),
+            "drill_name": tpl.get("name") or drill.get("drill_name") or "Unknown Drill",
             "description": drill.get("description", ""),
             "duration": drill.get("duration", "Not specified"),
             "frequency": drill.get("frequency", "As needed"),
-            "instructions": drill.get("instructions", []),
-            "video_url": drill.get("video_url"),
-            "justification": drill.get("justification"),
-            "reference": drill.get("reference"),
+            "instructions": drill.get("instructions_override") or tpl.get("instructions") or drill.get("instructions") or [],
+            "video_url": get_val("video_url"),
+            "thumbnail_url": get_val("thumbnail_url"),
+            "justification": drill.get("justification_override") or tpl.get("justification") or drill.get("justification"),
+            "reference": tpl.get("reference") or drill.get("reference"),
             "difficulty_level": max(1, min(5, drill.get("difficulty_level", 1))),  # Ensure 1-5 range
             "focus_note": drill.get("focus_note"),
             "intensity": drill.get("intensity"),
