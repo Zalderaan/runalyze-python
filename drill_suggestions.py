@@ -68,8 +68,9 @@ class DrillManager:
         AnalysisArea.FOOT_STRIKE.value: "Pay attention to landing softly and quietly",
         AnalysisArea.BACK_POSITION.value: "Maintain slight forward lean from ankles, not waist",
         AnalysisArea.ARM_FLEXION.value: "Keep shoulders relaxed while maintaining elbow angle",
-        AnalysisArea.RIGHT_KNEE.value: "Focus on smooth, controlled movement patterns",
-        AnalysisArea.LEFT_KNEE.value: "Focus on smooth, controlled movement patterns"
+        AnalysisArea.RIGHT_KNEE.value: "Focus on front-knee drive and controlled landing — absorb impact with a soft, flexed knee",
+        AnalysisArea.LEFT_KNEE.value: "Focus on back-leg recovery and heel kick — fold the trailing leg tightly behind you before swinging forward"
+
     }
     
     PERFORMANCE_RECOMMENDATIONS = {
