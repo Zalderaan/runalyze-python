@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 # Global progress storage (use Redis in production for multiple workers)
 progress_storage = {}
 results_storage = {}
+background_tasks = set()
 
 # Add progress tracking class
 
@@ -1319,18 +1320,24 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                     # Log memory before frame processing
                     log_frame_memory(current_frame_num, total_frames, "frame_start")
 
-                    # Process frame with memory optimization and rotation
-                    output_frame, lmList, analysis_data = process_frame_with_scaling(
+                    # Process frame with memory optimization and rotation in thread pool
+                    loop = asyncio.get_event_loop()
+                    output_frame, lmList, analysis_data = await loop.run_in_executor(
+                        None,
+                        process_frame_with_scaling,
                         frame, detector, processing_width, processing_height,
                         original_width, original_height, scale_factor, rotation
                     )
 
                     # Analyze frame if valid data
                     if analysis_data:
-                        # Check for foot contact
+                        # Check for foot contact in thread pool
                         if hasattr(detector, 'detectFootContact_Alternative'):
-                            contact_results = detector.detectFootContact_Alternative(
-                                output_frame, draw=True)
+                            contact_results = await loop.run_in_executor(
+                                None,
+                                detector.detectFootContact_Alternative,
+                                output_frame, True
+                            )
                         else:
                             contact_results = {
                                 "right_landing": current_frame_num % 2 == 0}
@@ -1842,10 +1849,12 @@ async def process_video_async(
 
     logger.info(f"File saved to {video_path}, starting background processing")
 
-    # ✅ Pass the VIDEO PATH and FILENAME instead of the file object
-    asyncio.create_task(
+    # ✅ Pass the VIDEO PATH and FILENAME instead of the file object and keep a strong reference to prevent GC cancellation
+    task = asyncio.create_task(
         process_video_background(video_path, file.filename, user_id, job_id)
     )
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
     return {"job_id": job_id, "status": "processing"}
 
@@ -1963,45 +1972,49 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
     """Background video processing with progress updates"""
     tracker = progress_storage[job_id]
 
-    # Start enhanced memory tracking
-    memory_tracker.start_tracking()
-
-    # Initialize processors
-    video_processor = VideoProcessor()
-    detector = pm.PoseDetector()         # <-- Move here
-
-    # Fetch user profile early so RFAnalyzer can apply height-adjusted tolerances
-    analyzer_user_profile = {}
-    username_for_storage = user_id  # Fallback to user_id if username not found
-    try:
-        profile_resp = supabase.table("users").select("height_cm, weight_kg, username").eq("id", user_id).limit(1).execute()
-        if profile_resp and profile_resp.data:
-            analyzer_user_profile = profile_resp.data[0]
-            if analyzer_user_profile.get("username"):
-                username_for_storage = analyzer_user_profile.get("username")
-            logger.info(f"Loaded user profile for analyzer: height={analyzer_user_profile.get('height_cm')}cm, weight={analyzer_user_profile.get('weight_kg')}kg, username={username_for_storage}")
-    except Exception as e:
-        logger.warning(f"Could not fetch user profile for analyzer (using defaults): {e}")
-
-    analyzer = rfa.RFAnalyzer(user_profile=analyzer_user_profile)
-
-    # initialize all variables at the start
+    # Initialize all variables in outer scope for exception/finally handling
     contact_results = {"right_landing": False}
     final_video_path = None
-    cap = None  # Initialize cap variable
-    out = None  # Initialize out variable
-
-    print("uid: ", user_id)
-    # create dir
-    os.makedirs(f"tmp/{user_id}/processed", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    original_filename = f"{timestamp}_{filename}"  # ✅ Use passed filename
-
-    # save video to temporary loc
-    # video_path = f"tmp/{user_id}/{file.filename}"
-    annotated_video_path = f"tmp/{user_id}/processed/processed_{filename}"
+    cap = None
+    out = None
+    video_processor = None
+    detector = None
+    analyzer = None
+    thumbnail_path = None
+    username_for_storage = user_id
+    original_filename = filename
 
     try:
+        # Start enhanced memory tracking
+        memory_tracker.start_tracking()
+
+        # Initialize processors
+        video_processor = VideoProcessor()
+        detector = pm.PoseDetector()
+
+        # Fetch user profile early so RFAnalyzer can apply height-adjusted tolerances
+        analyzer_user_profile = {}
+        try:
+            profile_resp = supabase.table("users").select("height_cm, weight_kg, username").eq("id", user_id).limit(1).execute()
+            if profile_resp and profile_resp.data:
+                analyzer_user_profile = profile_resp.data[0]
+                if analyzer_user_profile.get("username"):
+                    username_for_storage = analyzer_user_profile.get("username")
+                logger.info(f"Loaded user profile for analyzer: height={analyzer_user_profile.get('height_cm')}cm, weight={analyzer_user_profile.get('weight_kg')}kg, username={username_for_storage}")
+        except Exception as e:
+            logger.warning(f"Could not fetch user profile for analyzer (using defaults): {e}")
+
+        analyzer = rfa.RFAnalyzer(user_profile=analyzer_user_profile)
+
+        print("uid: ", user_id)
+        # create dir
+        os.makedirs(f"tmp/{user_id}/processed", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        original_filename = f"{timestamp}_{filename}"  # ✅ Use passed filename
+
+        # save video to temporary loc
+        annotated_video_path = f"tmp/{user_id}/processed/processed_{filename}"
+
         # === STAGE 1: FILE ALREADY UPLOADED ===
         tracker.update("upload", 5, "File uploaded, starting processing...")
         await asyncio.sleep(0.1)
@@ -2158,9 +2171,13 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
         print("=== STAGE 6.5: DETECTING RUNNING ACTIVITY ===")
         log_memory_usage("BEFORE_RUNNING_DETECTION")
 
-        # Detect if video contains running activity
-        running_detection = detect_running_activity(
-            video_path, detector, min_samples=10, confidence_threshold=0.65)
+        # Detect if video contains running activity using thread executor to prevent blocking
+        loop = asyncio.get_event_loop()
+        running_detection = await loop.run_in_executor(
+            None,
+            detect_running_activity,
+            video_path, detector, 10, 0.65
+        )
 
         if not running_detection["is_running"]:
             # Clean up resources before returning error
@@ -2171,22 +2188,17 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             # Clean up uploaded file
             cleanup_temp_enhanced(video_path, thumbnail_path)
 
-            # Return error response
-            raise HTTPException(
-                status_code=running_detection.get("status_code", 400),
-                detail={
-                    "error": "Invalid video content",
-                    "message": running_detection["reason"],
-                    "confidence": running_detection["confidence"],
-                    "details": running_detection["details"],
-                    "suggestions": [
-                        "Please upload a video showing running activity",
-                        "Ensure the person is clearly visible and in motion",
-                        "Video should show running gait with alternating leg movement",
-                        "Avoid videos of walking, standing, or other non-running activities"
-                    ]
-                }
-            )
+            # Return error response gracefully
+            tracker.update("error", 0, running_detection["reason"])
+            results_storage[job_id] = {
+                "success": False,
+                "error": "Invalid video content",
+                "message": running_detection["reason"],
+                "details": running_detection,
+                "status_code": 400
+            }
+            await asyncio.sleep(0.1)
+            return
 
         logger.info(
             f"Running detection passed: {running_detection['confidence']:.1%} confidence")
