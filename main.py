@@ -2463,7 +2463,11 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             logger.error(f"Error releasing video resources: {e}")
 
         # Set heavy objects to None to help garbage collection
-        detector.pose_landmarker.close()  # <-- fix here, close the pose object
+        if detector and hasattr(detector, 'pose_landmarker') and detector.pose_landmarker:
+            try:
+                detector.pose_landmarker.close()  # <-- fix here, close the pose object safely
+            except Exception as e:
+                logger.error(f"Error closing pose landmarker: {e}")
         detector = None
         analyzer = None
 
@@ -2961,7 +2965,11 @@ async def process_video(
             logger.error(f"Error releasing video resources: {e}")
 
         # Set heavy objects to None to help garbage collection
-        detector.pose_landmarker.close()  # <-- fix here, close the pose object
+        if detector and hasattr(detector, 'pose_landmarker') and detector.pose_landmarker:
+            try:
+                detector.pose_landmarker.close()  # <-- fix here, close the pose object safely
+            except Exception as e:
+                logger.error(f"Error closing pose landmarker: {e}")
         detector = None
         analyzer = None
 
