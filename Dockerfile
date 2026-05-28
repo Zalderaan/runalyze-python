@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Headless graphics / EGL dependencies for MediaPipe / OpenCV
     libgl1 \
     libglib2.0-0 \
-    libgles2-mesa \
-    libegl1-mesa \
+    libgles2 \
+    libegl1 \
     # Video processing dependencies
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
