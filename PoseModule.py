@@ -128,6 +128,10 @@ class PoseDetector():
     
     # * takes lmList per frame to calculate angles per frame
     def findAngle(self, frame, p1, p2, p3, draw=True):
+        # Guard: return None if any required landmark is missing
+        if not self.lmList or len(self.lmList) <= max(p1, p2, p3):
+            return None
+
         # Get the landmarks
         x1, y1 = self.lmList[p1][1], self.lmList[p1][2]  # [1] is x, [2] is y
         x2, y2 = self.lmList[p2][1], self.lmList[p2][2]
@@ -413,6 +417,10 @@ class PoseDetector():
             return None
             
     def findFootAngle(self, frame, right_ankle_id=28, right_hip_id=24, draw=True):
+        # Guard: return None if any required landmark is missing
+        if not self.lmList or len(self.lmList) <= max(right_ankle_id, right_hip_id):
+            return None
+
         xr_ankle=self.lmList[right_ankle_id][1]
         yr_ankle=self.lmList[right_ankle_id][2]
         xr_hip=self.lmList[right_hip_id][1]
@@ -719,7 +727,15 @@ class PoseDetector():
         
         # Check if we have all required landmarks
         required_landmarks = [left_ankle_id, right_ankle_id, left_heel_id, right_heel_id, left_toe_id, right_toe_id]
-        if all(len(self.lmList) > idx for idx in required_landmarks):
+        if not self.lmList or not all(len(self.lmList) > idx for idx in required_landmarks):
+            return {
+                'left_contact': False,
+                'right_contact': False,
+                'left_landing': False,
+                'right_landing': False
+            }
+
+        if True: # Kept indentation of the block for minimum-diff safety
             
             # Left foot analysis
             left_heel_y = self.lmList[left_heel_id][2]

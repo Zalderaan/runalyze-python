@@ -1302,6 +1302,12 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
             for i, frame in enumerate(batch_frames):
                 current_frame_num = batch_start + i + 1
 
+                # DEBUG: log rotation and dimensions for first frame of each batch
+                if i == 0 and batch_start == 0:
+                    logger.info(f"[DEBUG] Processing rotation={rotation}°, "
+                                f"original dimensions={original_width}x{original_height}, "
+                                f"output dimensions={processing_width}x{processing_height}")
+
                 # ✅ UPDATE PROGRESS EVERY FRAME (not every 5)
                 if tracker:
                     progress = 20 + (current_frame_num /
@@ -1329,6 +1335,11 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                         original_width, original_height, scale_factor, rotation
                     )
 
+                    # DEBUG: log landmark count per frame
+                    if current_frame_num % 10 == 0:  # log every 10th frame
+                        lm_count = len(lmList) if lmList else 0
+                        logger.info(f"[DEBUG] Frame {current_frame_num}: lmList={lm_count} landmarks, analysis_data type={type(analysis_data).__name__ if analysis_data else 'None'}")
+
                     # Analyze frame if valid data
                     if analysis_data:
                         # Check for foot contact in thread pool
@@ -1345,8 +1356,21 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                         if contact_results and contact_results.get('right_landing', False):
                             # Check if user went out of frame during a landing (critical moment)
                             if analysis_data == "out_of_frame":
-                                logger.error(f"User out of frame at critical landing: frame {current_frame_num}")
-                                raise ValueError("detected user went out of frame")
+                                # DEBUG: log which individual measurement failed (TEMPORARY FOR DEBUGGING)
+                                angles_debug = {
+                                    "head_position": detector.findHeadPosition(output_frame, draw=False) if lmList else "no_lmList",
+                                    "back_position": detector.findTorsoLean(output_frame, draw=False) if lmList else "no_lmList",
+                                    "arm_flexion": detector.findAngle(output_frame, 12, 14, 16, draw=False) if lmList else "no_lmList",
+                                    "left_knee": detector.findKneeAngle(output_frame, 23, 25, 27, draw=False) if lmList else "no_lmList",
+                                    "right_knee": detector.findKneeAngle(output_frame, 24, 26, 28, draw=False) if lmList else "no_lmList",
+                                    "foot_strike": detector.findFootAngle(output_frame, draw=False) if lmList else "no_lmList",
+                                }
+                                logger.error(
+                                    f"[DEBUG] Out-of-frame at landing frame {current_frame_num}/{total_frames}. "
+                                    f"lmList length: {len(lmList) if lmList else 0}. "
+                                    f"Individual measurements: {angles_debug}"
+                                )
+                                # raise ValueError("Running posture analysis failed. Please ensure the runner is fully visible in a profile (side) view and is actively running/jogging throughout the video.")  # ← TEMPORARILY COMMENTED OUT FOR DEBUGGING (uncomment in production)
                                 
                             analyzer.analyze_frame(analysis_data)
                             processed_count += 1
@@ -1364,8 +1388,8 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
                     del frame
 
                 except ValueError as ve:
-                    # Re-raise explicit "out of frame" error to stop processing
-                    if str(ve) == "detected user went out of frame":
+                    # Re-raise explicit "out of frame" or analysis failure error to stop processing
+                    if "Running posture analysis failed" in str(ve) or str(ve) == "detected user went out of frame":
                         raise ve
                     
                 except Exception as e:
@@ -1390,8 +1414,8 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
             gc.collect()
 
     except ValueError as ve:
-        if str(ve) == "detected user went out of frame":
-            logger.error("Stopping process: User went out of frame")
+        if "Running posture analysis failed" in str(ve) or str(ve) == "detected user went out of frame":
+            logger.error(f"Stopping process: {ve}")
             raise ve
         else:
             logger.error(f"ValueError in streaming processing: {ve}")
@@ -1546,16 +1570,26 @@ class DatabaseManager:
 
             # 1. Insert analysis results
             # Check for missing values - user must always be in frame
-            required_joints = ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
-            for joint in required_joints:
-                val = analysis_summary.get(joint, {}).get("median_score")
-                if val is None:
-                    logger.error(f"Validation failed: {joint} is missing in analysis results")
-                    return {
-                        "success": False,
-                        "error": "error: detected user went out of frame",
-                        "data": analysis_summary
-                    }
+            DEBUG_BYPASS_FRAME_VALIDATION = True  # ← Set to False in production/after debugging
+
+            if not DEBUG_BYPASS_FRAME_VALIDATION:
+                required_joints = ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
+                for joint in required_joints:
+                    val = analysis_summary.get(joint, {}).get("median_score")
+                    if val is None:
+                        logger.error(f"Validation failed: {joint} is missing in analysis results")
+                        return {
+                            "success": False,
+                            "error": "Running posture analysis failed. Please ensure the runner is fully visible in a profile (side) view and is actively running/jogging throughout the video.",
+                            "data": analysis_summary
+                        }
+            else:
+                # DEBUG: Log which joints are missing instead of blocking
+                required_joints = ["head_position", "back_position", "arm_flexion", "right_knee", "left_knee", "foot_strike"]
+                for joint in required_joints:
+                    val = analysis_summary.get(joint, {}).get("median_score")
+                    if val is None:
+                        logger.warning(f"[DEBUG] Joint '{joint}' has None median_score — bypassing validation for debug")
 
             results_data = {
                 "user_id": user_id,
