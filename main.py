@@ -1297,6 +1297,8 @@ async def process_video_streaming_optimized(cap, out, detector, analyzer, total_
 
             # Read batch of frames
             for i in range(batch_size):
+                if frame_count >= total_frames:
+                    break
                 ret, frame = cap.read()
                 if not ret:
                     break
@@ -2154,42 +2156,12 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
         duration_seconds = total_frames / fps if fps > 0 else 0
 
         MAX_DURATION = 10
+        max_allowed_frames = int(MAX_DURATION * fps) if fps > 0 else 300
 
-        if duration_seconds > MAX_DURATION:
-            # Clean up resources
-            if cap:
-                cap.release()
-            # cv2.destroyAllWindows()
-            cleanup_temp_enhanced(video_path, thumbnail_path)
-
-            # ✅ Create error details as a dict
-            error_details = {
-                "error": "Video too long",
-                "message": f"Video duration is {duration_seconds:.1f}s. Maximum allowed is {MAX_DURATION}s.",
-                "duration_seconds": round(duration_seconds, 1),
-                "max_duration": MAX_DURATION,
-                "suggestions": [
-                    f"Please trim your video to under {MAX_DURATION} seconds",
-                    "Focus on capturing 5-10 seconds of continuous running",
-                    "Shorter videos process faster and provide focused feedback"
-                ]
-            }
-
-            # ✅ Update tracker with just the message string
-            tracker.update("error", 0, error_details["message"])
-            await asyncio.sleep(0.1)
-
-            # ✅ Store detailed error in results
-            results_storage[job_id] = {
-                "success": False,
-                "error": error_details["error"],
-                "message": error_details["message"],
-                "details": error_details,
-                "status_code": 400
-            }
-
-            # Don't raise HTTPException - we're already in background task
-            return
+        if total_frames > max_allowed_frames:
+            logger.info(f"Video duration ({duration_seconds:.1f}s) exceeds {MAX_DURATION}s. Capping total frames from {total_frames} to {max_allowed_frames}.")
+            total_frames = max_allowed_frames
+            duration_seconds = MAX_DURATION
 
         logger.info(
             f"Video duration validation passed: {duration_seconds:.1f}s")
@@ -2291,6 +2263,10 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
             original_width, original_height, scale_factor, rotation,
             tracker=tracker  # ← Pass the tracker
         )
+
+        # Update duration_seconds to reflect the actual frames processed
+        if fps > 0:
+            duration_seconds = frame_count / fps
 
         processing_stats = f"{frame_count} frames, {processed_frames} analyzed, {processing_time:.1f}s total"
         memory_summary = f"Peak: {memory_stats.get('summary', {}).get('peak_memory_mb', 0):.1f}MB, Avg FPS: {memory_stats.get('summary', {}).get('average_fps', 0):.1f}"
