@@ -423,6 +423,14 @@ class VideoProcessor:
                     logger.info(
                         "No rotation metadata found, checking dimensions...")
 
+                    file_ext = os.path.splitext(video_path)[1].lower()
+                    # webm from browser MediaRecorder never embeds rotation metadata
+                    if not rotation_found and file_ext in ('.webm',):
+                        if height > width and height / width > 1.2:
+                            logger.info(
+                                f"webm portrait dimensions detected ({width}x{height}), applying 90° correction")
+                            return 90
+
                     # For videos that appear vertical but should be landscape (mobile issue)
                     # Only apply this if there's NO existing rotation metadata
                     if height > width and height / width > 1.3:
