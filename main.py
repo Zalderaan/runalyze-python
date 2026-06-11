@@ -1177,6 +1177,100 @@ def detect_running_activity(video_path: str, detector, min_samples: int = 10, co
         }
 
 
+def check_runner_distance(
+    video_path: str,
+    detector,
+    min_samples: int = 8,
+    too_close_threshold: float = 0.85,
+    too_far_threshold: float = 0.20,
+) -> Dict[str, Any]:
+    """
+    Estimate runner-to-camera distance by measuring body coverage ratio.
+
+    body_ratio = (ankle_y - nose_y) / frame_height
+
+    Ideal range: 0.20 – 0.85 (roughly 3–5 m from camera for a typical runner).
+    """
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {"status": "ok", "reason": "Could not open video for distance check"}
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        sample_interval = max(1, total_frames // 20)
+        rotation = VideoProcessor.get_video_rotation(video_path)
+
+        ratios = []
+        frame_count = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_count % sample_interval != 0:
+                frame_count += 1
+                continue
+
+            if rotation != 0:
+                frame = smart_rotate_frame(frame, rotation)
+                frame_height = frame.shape[0]
+
+            frame_with_pose = detector.findPose(frame, draw=False)
+            landmarks = detector.findPosition(frame_with_pose, draw=False)
+
+            if landmarks and len(landmarks) >= 29:
+                nose_y    = landmarks[0][2]   # landmark 0: nose
+                l_ankle_y = landmarks[27][2]  # landmark 27: left ankle
+                r_ankle_y = landmarks[28][2]  # landmark 28: right ankle
+                ankle_y   = max(l_ankle_y, r_ankle_y)  # lowest point
+                ratio     = (ankle_y - nose_y) / frame_height if frame_height > 0 else 0
+                if ratio > 0:
+                    ratios.append(ratio)
+                if len(ratios) >= min_samples:
+                    break
+
+            frame_count += 1
+
+        cap.release()
+
+        if not ratios:
+            return {"status": "ok", "reason": "Not enough landmarks for distance check"}
+
+        median_ratio = sorted(ratios)[len(ratios) // 2]
+
+        if median_ratio > too_close_threshold:
+            return {
+                "status": "too_close",
+                "median_ratio": round(median_ratio, 3),
+                "reason": (
+                    "The runner appears too close to the camera. "
+                    "Please move the camera further back (aim for 3–5 meters) "
+                    "so the runner's full body is visible from head to toe."
+                ),
+            }
+        if median_ratio < too_far_threshold:
+            return {
+                "status": "too_far",
+                "median_ratio": round(median_ratio, 3),
+                "reason": (
+                    "The runner appears too far from the camera. "
+                    "Please move the camera closer (aim for 3–5 meters) "
+                    "so the runner's body fills more of the frame."
+                ),
+            }
+
+        return {
+            "status": "ok",
+            "median_ratio": round(median_ratio, 3),
+            "reason": "Runner distance is within acceptable range.",
+        }
+    except Exception as e:
+        logger.error(f"Error in distance check: {e}")
+        return {"status": "ok", "reason": f"Distance check failed due to error: {str(e)}"}
+
+
+
 def process_frame_with_scaling(frame, detector, processing_width, processing_height,
                                original_width, original_height, scale_factor, rotation=0):
     """
@@ -2221,6 +2315,29 @@ async def process_video_background(video_path: str, filename: str, user_id: str,
         log_memory_usage("AFTER_RUNNING_DETECTION",
                          f"Confidence: {running_detection['confidence']:.1%}")
 
+        # === STAGE 6.6: RUNNER DISTANCE CHECK ===
+        tracker.update("processing", 28, "Checking camera distance...")
+        distance_check = await loop.run_in_executor(
+            None,
+            check_runner_distance,
+            video_path, detector
+        )
+
+        if distance_check["status"] in ("too_close", "too_far"):
+            if cap:
+                cap.release()
+            cleanup_temp_enhanced(video_path, thumbnail_path)
+            tracker.update("error", 0, distance_check["reason"])
+            results_storage[job_id] = {
+                "success": False,
+                "error": "Camera distance issue",
+                "message": distance_check["reason"],
+                "details": distance_check,
+                "status_code": 400,
+            }
+            await asyncio.sleep(0.1)
+            return
+
         # === STAGE 7: OUTPUT VIDEO WRITER SETUP ===
         print("=== STAGE 7: SETTING UP OUTPUT VIDEO WRITER ===")
         log_memory_usage("BEFORE_OUTPUT_WRITER_SETUP")
@@ -2766,6 +2883,26 @@ async def process_video(
 
         logger.info(
             f"Running detection passed: {running_detection['confidence']:.1%} confidence")
+
+        # === STAGE 6.6: RUNNER DISTANCE CHECK ===
+        distance_check = check_runner_distance(video_path, detector)
+        if distance_check["status"] in ("too_close", "too_far"):
+            if cap:
+                cap.release()
+            cleanup_temp_enhanced(video_path, thumbnail_path)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Camera distance issue",
+                    "message": distance_check["reason"],
+                    "details": distance_check,
+                    "suggestions": [
+                        "Position camera 3–5 meters away from the runner",
+                        "Ensure the runner is fully visible from head to toe",
+                        "Ensure the camera is placed at a side view profile"
+                    ]
+                }
+            )
         print(
             f"Running activity confirmed: {running_detection['confidence']:.1%} confidence")
         log_memory_usage("AFTER_RUNNING_DETECTION",
